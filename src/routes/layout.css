@@ -1,0 +1,64 @@
+@import 'tailwindcss';
+@plugin '@tailwindcss/forms';
+@plugin '@tailwindcss/typography';
+
+/* Calculator responsive grid — stacks to 1 column on mobile */
+.calc-grid-3 {
+	display: grid;
+	grid-template-columns: 1fr 1fr 1fr;
+	gap: 12px;
+}
+
+@media (max-width: 640px) {
+	.calc-grid-3 {
+		grid-template-columns: 1fr;
+	}
+}
+
+/* Milestone row — collapses the label/detail/check layout */
+.calc-milestone-row {
+	display: grid;
+	grid-template-columns: 56px 1fr auto;
+	align-items: center;
+	gap: 16px;
+}
+
+@media (max-width: 640px) {
+	.calc-milestone-row {
+		grid-template-columns: 48px 1fr;
+		gap: 8px;
+	}
+
+	.calc-milestone-check {
+		display: none;
+	}
+}
+
+/* Chart legend — wraps on small screens */
+.calc-legend {
+	display: flex;
+	justify-content: center;
+	gap: 24px;
+	flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+	.calc-legend {
+		gap: 12px 20px;
+	}
+}
+
+/* Sources header — stacks on mobile */
+.calc-sources-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+
+@media (max-width: 640px) {
+	.calc-sources-header {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 4px;
+	}
+}
