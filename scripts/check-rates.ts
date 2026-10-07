@@ -58,8 +58,17 @@ interface Edition {
 	$: CheerioAPI;
 	/** Whole-page text with whitespace collapsed, for formula regexes */
 	text: string;
-	/** Text under each heading, keyed by heading text (repeated headings concatenated) */
+	/** Text under each heading, keyed by lowercased heading (repeats concatenated) */
 	sections: Map<string, string>;
+	/** Text between each heading and the next, in document order */
+	segments: Segment[];
+}
+
+interface Segment {
+	/** Lowercased heading text */
+	heading: string;
+	level: number;
+	text: string;
 }
 
 const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -74,7 +83,7 @@ async function fetchEdition(url: string): Promise<Edition> {
 	const title = clean($('h1').first().text());
 	const m = title.match(/Effective (January|July) 1, (\d{4})/);
 	if (!m) throw new Error(`unrecognised page title "${title}"`);
-	const main = $('main').html() ?? '';
+	const segments = parseSegments($('main').html() ?? '');
 	return {
 		url,
 		title,
@@ -82,28 +91,50 @@ async function fetchEdition(url: string): Promise<Edition> {
 		month: m[1] === 'January' ? 1 : 7,
 		$,
 		text: clean($('main').text()),
-		sections: parseSections(main)
+		sections: groupSections(segments),
+		segments
 	};
 }
 
 /**
  * Split the page at its h2–h5 headings. CRA wraps headings and their content
- * in separate divs, so this works on document order rather than siblings: a
- * heading's section runs until the next heading of the same or higher level.
+ * in separate divs, so this works on document order rather than siblings.
  */
-function parseSections(html: string): Map<string, string> {
+function parseSegments(html: string): Segment[] {
 	const headings = [...html.matchAll(/<h([2-5])[^>]*>([\s\S]*?)<\/h\1>/g)];
-	const segments = headings.map((h, i) =>
-		clean(load(html.slice(h.index + h[0].length, headings[i + 1]?.index ?? html.length)).text())
-	);
+	return headings.map((h, i) => ({
+		heading: clean(load(h[2]).text()).toLowerCase(),
+		level: Number(h[1]),
+		text: clean(
+			load(html.slice(h.index + h[0].length, headings[i + 1]?.index ?? html.length)).text()
+		)
+	}));
+}
+
+/** A heading's section runs until the next heading of the same or higher level */
+function groupSections(segments: Segment[]): Map<string, string> {
 	const out = new Map<string, string>();
-	headings.forEach((h, i) => {
-		const level = Number(h[1]);
-		const end = headings.findIndex((n, j) => j > i && Number(n[1]) <= level);
-		const body = segments.slice(i, end === -1 ? undefined : end).join(' ');
-		const name = clean(load(h[2]).text());
-		out.set(name, `${out.get(name) ?? ''} ${body}`.trim());
+	segments.forEach((seg, i) => {
+		const end = segments.findIndex((n, j) => j > i && n.level <= seg.level);
+		const body = segments
+			.slice(i, end === -1 ? undefined : end)
+			.map((x) => x.text)
+			.join(' ');
+		out.set(seg.heading, `${out.get(seg.heading) ?? ''} ${body}`.trim());
 	});
+	return out;
+}
+
+/** Headings enclosing segment `i`: its own, then each earlier heading of a higher level */
+function enclosingHeadings(segments: Segment[], i: number): string[] {
+	const out = [segments[i].heading];
+	let level = segments[i].level;
+	for (let j = i - 1; j >= 0 && level > 2; j--) {
+		if (segments[j].level < level) {
+			out.push(segments[j].heading);
+			level = segments[j].level;
+		}
+	}
 	return out;
 }
 
@@ -111,7 +142,9 @@ function parseSections(html: string): Map<string, string> {
 function table(ed: Edition, caption: string): string[][] {
 	const { $ } = ed;
 	const el = $('table')
-		.filter((_, t) => clean($(t).find('caption').text()).startsWith(caption))
+		.filter((_, t) =>
+			clean($(t).find('caption').text()).toLowerCase().startsWith(caption.toLowerCase())
+		)
 		.first();
 	return el
 		.find('tr')
@@ -191,8 +224,10 @@ function parseOtherTable(rows: string[][]): Map<string, OtherAmounts> {
 
 /** "Where NI* ≤ $X, NAME = $Y" … "Where NI* ≥ $Z, NAME = $W"; null unless fully parsed */
 function parseBpaFormula(text: string, name: string) {
-	const low = text.match(new RegExp(`Where NI\\*? ≤ \\$([\\d,]+), ${name}\\s*=\\s*\\$([\\d,]+)`));
-	const high = text.match(new RegExp(`Where NI\\*? ≥ \\$([\\d,]+), ${name}\\s*=\\s*\\$([\\d,]+)`));
+	const clause = (op: string) =>
+		new RegExp(`Where NI\\*? ${op} \\$([\\d,]+), ${name}\\s*=\\s*\\$([\\d,]+)`, 'i');
+	const low = text.match(clause('≤'));
+	const high = text.match(clause('≥'));
 	if (!low || !high) return null;
 	return {
 		amountMax: num(low[2]),
@@ -208,7 +243,7 @@ type ReductionFormula =
 
 /** Which factor S formula a province section uses, with its threshold and rate */
 function parseReduction(text: string): ReductionFormula | null {
-	const incomeTested = text.match(/Where A ≤ \$([\d,]+), S is equal to the lesser of/);
+	const incomeTested = text.match(/Where A ≤ \$([\d,]+), S is equal to the lesser of/i);
 	if (incomeTested) {
 		const rate = text.match(/\(A – \$[\d,]+\) × ([\d.]+)%/);
 		return {
@@ -217,7 +252,7 @@ function parseReduction(text: string): ReductionFormula | null {
 			rate: num(rate?.[1]) / 100
 		};
 	}
-	const ontario = text.match(/\[(\d+) × \(\$[\d,]+ \+ Y\)\]/);
+	const ontario = text.match(/\[(\d+) × \(\$[\d,]+ \+ Y\)\]/i);
 	if (ontario) return { kind: 'ontario', multiplier: num(ontario[1]) };
 	return null;
 }
@@ -231,11 +266,12 @@ interface PremiumTier {
 
 /** Ontario Health Premium (V2): "the lesser of: (i) $cap; (ii) $base + (rate × (A – $start))" */
 function parseHealthPremium(text: string): PremiumTier[] {
-	const from = text.search(/V2\s*=\s*Where A/);
+	const from = text.search(/V2\s*=\s*Where A/i);
 	if (from === -1) return [];
-	const block = text.slice(from, text.indexOf('Note:', from));
+	const to = text.slice(from).search(/Note:/i);
+	const block = to === -1 ? text.slice(from) : text.slice(from, from + to);
 	const tierPattern =
-		/\(i\) \$([\d,]+); \(ii\) (?:\$([\d,]+) \+ \()?([\d.]+) × \(A – \$([\d,]+)\)/g;
+		/\(i\) \$([\d,]+); \(ii\) (?:\$([\d,]+) \+ \()?([\d.]+) × \(A – \$([\d,]+)\)/gi;
 	return [...block.matchAll(tierPattern)].map((m) => ({
 		cap: num(m[1]),
 		base: m[2] ? num(m[2]) : 0,
@@ -390,15 +426,22 @@ class Sources {
 	}
 }
 
-/** Text of the section whose heading contains `heading` */
-function sectionContaining(ed: Edition, heading: string): string | null {
-	for (const [name, text] of ed.sections) if (name.includes(heading)) return text;
-	return null;
+/** An edition's whole text, if it defines `name` anywhere (any case, any heading) */
+function definedIn(ed: Edition, name: string): string | null {
+	return new RegExp(`\\b${name}\\s*\\**\\s*=`, 'i').test(ed.text) || hasFormulaHeading(ed, name)
+		? ed.text
+		: null;
+}
+
+/** A heading like "Federal Basic Personal Amount (BPAF) Formula", in any case */
+function hasFormulaHeading(ed: Edition, name: string): boolean {
+	const tag = `(${name.toLowerCase()})`;
+	return ed.segments.some((seg) => seg.heading.includes(tag) && seg.heading.includes('formula'));
 }
 
 /** A province's own section, when it defines `marker` */
 function provinceSection(ed: Edition, name: string, marker: RegExp): string | null {
-	const text = ed.sections.get(name);
+	const text = ed.sections.get(name.toLowerCase());
 	return text && marker.test(text) ? text : null;
 }
 
@@ -407,11 +450,46 @@ function bpaFormula(src: Sources, name: string) {
 	const label = `${name} formula`;
 	const formula = src.formula(
 		label,
-		(ed) => sectionContaining(ed, `(${name}) Formula`),
+		(ed) => definedIn(ed, name),
 		(t) => parseBpaFormula(t, name)
 	);
 	if (formula === undefined) unverified.push(`${label} (not found in any edition)`);
 	return formula ?? { amountMax: NaN, amountMin: NaN, start: NaN, end: NaN };
+}
+
+/** Text of each innermost element that defines BPAYT, one per line */
+function yukonRules(ed: Edition): string | null {
+	const { $ } = ed;
+	const defines = (el: Parameters<typeof $>[0]) => /\bBPAYT\s*=/i.test($(el).text());
+	const rules = $('main *')
+		.filter(
+			(_, el) =>
+				defines(el) &&
+				$(el)
+					.children()
+					.filter((_, c) => defines(c)).length === 0
+		)
+		.toArray()
+		.map((el) => clean($(el).text()));
+	if (rules.length > 0) return rules.join('\n');
+	// A BPAYT formula heading without a recognisable rule must not fall back to January
+	return hasFormulaHeading(ed, 'BPAYT') ? '' : null;
+}
+
+const FACTOR_S = /(?:^|\s)S\s*=/i;
+
+/** Factor S formulas must sit under a recognised province heading to be checked */
+function checkReductionAttribution(src: Sources) {
+	const provinces = new Set(PROVINCES.map((c) => PROVINCE_EXTRAS[c].name.toLowerCase()));
+	for (const ed of src.editions) {
+		ed.segments.forEach((seg, i) => {
+			if (!FACTOR_S.test(seg.text)) return;
+			if (enclosingHeadings(ed.segments, i).some((h) => provinces.has(h))) return;
+			unverified.push(
+				`a factor S formula under "${seg.heading}" in ${ed.title} (no province heading)`
+			);
+		});
+	}
 }
 
 async function main() {
@@ -488,13 +566,9 @@ async function main() {
 	// The latest edition that defines BPAYT decides whether it still mirrors BPAF
 	const yukonMirrorsFederal = src.formula(
 		'BPAYT formula',
-		(ed) => sectionContaining(ed, '(BPAYT) Formula'),
-		(t) => {
-			// Only the plain equality counts; "BPAF + $1,000" and the like don't
-			const rule = t.match(/BPAYT\s*=\s*([^.;]*)/);
-			if (!rule) return null;
-			return /^BPAF\b(?!\s*[-+–×*/(])/.test(rule[1].trim());
-		}
+		yukonRules,
+		// Every BPAYT rule must be exactly the equality the app implements
+		(rules) => rules.split('\n').every((r) => /^BPAYT\s*=\s*BPAF$/i.test(r))
 	);
 	for (const code of PROVINCES) {
 		const extras = PROVINCE_EXTRAS[code];
@@ -532,6 +606,7 @@ async function main() {
 		compareBrackets('Provincial brackets', code, FALLBACK_PROVINCE_BRACKETS[code], rates.get(code));
 	}
 
+	checkReductionAttribution(src);
 	checkHealthPremium(src);
 	await checkRatesPage(latest.year);
 	report(yearBehind);
@@ -587,7 +662,7 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 	const reduction = extras.taxReduction;
 	const formula = src.formula(
 		`${code} tax reduction (factor S)`,
-		(ed) => provinceSection(ed, extras.name, /(?:^|\s)S\s*=/),
+		(ed) => provinceSection(ed, extras.name, FACTOR_S),
 		parseReduction
 	);
 	if (formula === null) return; // present but not parsable: already unverified
@@ -638,7 +713,7 @@ function checkHealthPremium(src: Sources) {
 	const section = 'Ontario Health Premium';
 	const tiers = src.formula(
 		'Ontario Health Premium (V2) formula',
-		(ed) => provinceSection(ed, 'Ontario', /V2\s*=/),
+		(ed) => definedIn(ed, 'V2'),
 		(t) => {
 			const parsed = parseHealthPremium(t);
 			return parsed.length > 0 ? parsed : null;
