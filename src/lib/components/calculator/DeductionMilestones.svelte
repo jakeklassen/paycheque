@@ -101,8 +101,9 @@
 		</strong>
 		{#if unmaxed.length > 0}
 			— {joinNames(unmaxed.map((m) => m.label))}
-			{unmaxed.length === 1 ? "doesn't" : "don't"} reach the maximum at this salary, so
-			{unmaxed.length === 1 ? 'it comes' : 'they come'} off every cheque all year.
+			{unmaxed.length === 1 ? "doesn't" : "don't"} reach
+			{unmaxed.length === 1 ? 'its' : 'their'} maximum at this salary, so there's no mid-year jump in
+			take-home.
 		{:else if lastMaxed && lastMaxed.period < data.periods.length}
 			— all maxed by the
 			<strong style="color: #66bb6a;">{lastMaxed.date.label}</strong> cheque, then take-home rises

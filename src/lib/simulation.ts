@@ -122,7 +122,9 @@ export function simulate(
 
 		// Withholding: annualize this cheque (T4127 factor A). Credits use the
 		// greater of the annualized and year-to-date contributions, and the
-		// annual maximum once it's reached (T4127's recommended approach)
+		// annual maximum once it's reached (T4127's recommended approach). The
+		// note compares against YTD CPP (D); we take its base share so both sides
+		// measure base contributions, the amount the credit is based on.
 		const cppCredit =
 			cppMaxed !== null
 				? cppBaseMax
