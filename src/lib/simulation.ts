@@ -11,8 +11,17 @@ import { CPP_ENHANCED_RATE, PAY_FREQUENCIES } from './constants';
 import { MONTH_NAMES, payDates } from './pay-schedule';
 import { calcFederalTax, calcHealthPremium, calcProvincialTax } from './tax';
 
+/** Cents, ignoring floating-point noise (so 81.355 isn't stored as 81.35499…) */
+const cents = (v: number) => Number((v * 100).toPrecision(12));
+
+/** Round half up to cents (T4127 rounding rules) */
 function round2(v: number): number {
-	return Math.round(v * 100) / 100;
+	return Math.round(cents(v)) / 100;
+}
+
+/** Drop digits past the cents (T4127 rule for the per-period CPP exemption) */
+function truncate2(v: number): number {
+	return Math.trunc(cents(v)) / 100;
 }
 
 /** Income tax on an annual (or annualized) basis: federal, provincial, health premium */
@@ -33,9 +42,12 @@ function annualTax(
  * Simulate a year of paycheques following CRA's T4127 payroll formulas
  * (Option 1): CPP's basic exemption is spread across pay periods, CPP2 starts
  * once earnings pass the YMPE, and each cheque's income tax is the annualized
- * tax on that cheque — including credits for the CPP and EI deducted on it, so
- * withholding rises once they max out. The annual tax actually owed is
- * computed separately; the difference is the refund at filing time.
+ * tax on that cheque. CPP/EI credits follow T4127's recommendation: the
+ * greater of the annualized and year-to-date amounts, and the annual maximum
+ * from the cheque where contributions max out. Withholding still rises a
+ * little after that because the enhanced CPP and CPP2 deductions stop. The
+ * annual tax actually owed is computed separately; the difference is the
+ * refund (or balance owing) at filing time.
  */
 export function simulate(
 	annualGross: number,
@@ -55,6 +67,7 @@ export function simulate(
 	const { cpp, cpp2 } = config;
 	const enhancedShare = CPP_ENHANCED_RATE / cpp.rate;
 	const cppBaseMax = cpp.maxEmployee * (1 - enhancedShare);
+	const exemption = truncate2(cpp.exemption / P);
 
 	// Full-year contributions drive the tax actually owed
 	const annualCPP = Math.min(
@@ -88,44 +101,46 @@ export function simulate(
 	for (let i = 0; i < P; i++) {
 		const date = dates[i];
 
-		const cppP = Math.min(
-			round2(cpp.rate * Math.max(0, gross - cpp.exemption / P)),
-			round2(cpp.maxEmployee - cumCPP)
-		);
-		const above = Math.max(
+		const cppP = Math.max(
 			0,
-			Math.min(cumGross + gross, cpp2.yampe) - Math.max(cpp2.floor, cumGross)
+			Math.min(round2(cpp.rate * (gross - exemption)), round2(cpp.maxEmployee - cumCPP))
 		);
-		const cpp2P = Math.min(round2(above * cpp2.rate), round2(cpp2.maxEmployee - cumCPP2));
-		const eiP = Math.min(round2(gross * ei.rate), round2(ei.maxEmployee - cumEI));
+		// CPP2 on earnings above the greater of YTD earnings and the YMPE (factor W)
+		const cpp2Base = cumGross + gross - Math.max(cumGross, cpp2.floor);
+		const cpp2P = Math.max(
+			0,
+			Math.min(round2(cpp2Base * cpp2.rate), round2(cpp2.maxEmployee - cumCPP2))
+		);
+		const eiP = Math.max(0, Math.min(round2(gross * ei.rate), round2(ei.maxEmployee - cumEI)));
+
+		const cppReachesMax = cppP > 0 && cpp.maxEmployee - (cumCPP + cppP) < 0.005;
+		const cpp2ReachesMax = cpp2P > 0 && cpp2.maxEmployee - (cumCPP2 + cpp2P) < 0.005;
+		const eiReachesMax = eiP > 0 && ei.maxEmployee - (cumEI + eiP) < 0.005;
+		if (cppReachesMax) cppMaxed = { period: i + 1, date };
+		if (cpp2ReachesMax) cpp2Maxed = { period: i + 1, date };
+		if (eiReachesMax) eiMaxed = { period: i + 1, date };
+
+		// Withholding: annualize this cheque (T4127 factor A). Credits use the
+		// greater of the annualized and year-to-date contributions, and the
+		// annual maximum once it's reached (T4127's recommended approach)
+		const cppCredit =
+			cppMaxed !== null
+				? cppBaseMax
+				: Math.min(cppBaseMax, Math.max(P * cppP, cumCPP) * (1 - enhancedShare));
+		const eiCredit =
+			eiMaxed !== null ? ei.maxEmployee : Math.min(ei.maxEmployee, Math.max(P * eiP, cumEI));
+		const perCheque = annualTax(
+			Math.max(0, P * (gross - rrsp - cppP * enhancedShare - cpp2P)),
+			{ cppBase: cppCredit, ei: eiCredit, employmentIncome: P * gross },
+			province,
+			config
+		);
+		const tax = round2((perCheque.federal + perCheque.provincial + perCheque.healthPremium) / P);
 
 		cumGross += gross;
 		cumCPP += cppP;
 		cumCPP2 += cpp2P;
 		cumEI += eiP;
-		if (cppMaxed === null && cppP > 0 && cpp.maxEmployee - cumCPP < 0.005) {
-			cppMaxed = { period: i + 1, date };
-		}
-		if (cpp2Maxed === null && cpp2P > 0 && cpp2.maxEmployee - cumCPP2 < 0.005) {
-			cpp2Maxed = { period: i + 1, date };
-		}
-		if (eiMaxed === null && eiP > 0 && ei.maxEmployee - cumEI < 0.005) {
-			eiMaxed = { period: i + 1, date };
-		}
-
-		// Withholding: annualize this cheque (T4127 factor A) with credits for
-		// the contributions deducted on it, capped at the annual maximums
-		const perCheque = annualTax(
-			Math.max(0, P * (gross - rrsp - cppP * enhancedShare - cpp2P)),
-			{
-				cppBase: Math.min(P * cppP * (1 - enhancedShare), cppBaseMax),
-				ei: Math.min(P * eiP, ei.maxEmployee),
-				employmentIncome: P * gross
-			},
-			province,
-			config
-		);
-		const tax = round2((perCheque.federal + perCheque.provincial + perCheque.healthPremium) / P);
 
 		periods.push({
 			date,

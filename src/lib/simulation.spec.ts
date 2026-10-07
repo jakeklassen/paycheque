@@ -43,7 +43,9 @@ describe('simulate', () => {
 		expect(result.totalAnnualNet).toBeCloseTo(115_343.56, 2);
 	});
 
-	it('annual net is the same for every pay frequency', () => {
+	// Holds here because every contribution reaches its maximum; at lower
+	// salaries per-cheque rounding can move the total by a few cents
+	it('annual net is the same for every pay frequency at $170,000', () => {
 		for (const frequency of Object.keys(PAY_FREQUENCIES) as PayFrequency[]) {
 			const r = simulate(170_000, 0, 'ON', CONFIG, frequency);
 			expect(r.totalAnnualNet).toBeCloseTo(115_343.56, 2);
@@ -52,12 +54,13 @@ describe('simulate', () => {
 	});
 });
 
-// Per-cheque withholding computed independently from the T4127 Option 1 formulas
+// Per-cheque payroll computed independently from the T4127 Option 1 text,
+// including its recommended CPP/EI credit handling after max-out
 describe('paycheques', () => {
 	it.each([
 		// frequency, first cheque net, last cheque net, take-home in cheques, refund
-		['semi-monthly', 4_528.22, 4_982.94, 114_769.83, 573.73],
-		['biweekly', 4_179.89, 4_599.64, 114_764.76, 578.8]
+		['semi-monthly', 4_528.22, 5_025.26, 115_343.63, -0.07],
+		['biweekly', 4_179.89, 4_638.7, 115_343.55, 0.01]
 	] as const)('%s at $170,000 in Ontario', (frequency, first, last, paycheques, refund) => {
 		const r = simulate(170_000, 0, 'ON', CONFIG, frequency);
 		expect(r.firstChequeNet).toBeCloseTo(first, 2);
@@ -74,6 +77,18 @@ describe('paycheques', () => {
 		expect(r.eiMaxed).toMatchObject({ period: 10, date: { label: 'May 31' } });
 		expect(r.cppMaxed).toMatchObject({ period: 11, date: { label: 'Jun 15' } });
 		expect(r.cpp2Maxed).toMatchObject({ period: 12, date: { label: 'Jun 30' } });
+	});
+
+	it('collects the full CPP2 despite per-cheque rounding', () => {
+		const r = simulate(90_000, 0, 'ON', CONFIG, 'weekly');
+		expect(r.totalCPP2).toBeCloseTo(416, 2);
+		expect(r.cpp2Maxed).toMatchObject({ period: 50, date: { label: 'Dec 11' } });
+	});
+
+	it('truncates the per-cheque CPP exemption to cents', () => {
+		const r = simulate(74_600, 0, 'ON', CONFIG, 'weekly');
+		expect(r.totalCPP).toBeCloseTo(4_230.45, 2);
+		expect(r.cppMaxed?.period).toBe(52);
 	});
 
 	it('puts a third biweekly cheque in two months', () => {

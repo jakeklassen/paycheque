@@ -17,6 +17,7 @@
 				label: 'EI',
 				max: ei.maxEmployee,
 				maxed: data.eiMaxed,
+				total: data.totalEI,
 				color: '#42a5f5',
 				detail: `${(ei.rate * 100).toFixed(2)}% on earnings up to $${ei.mie.toLocaleString()}`
 			},
@@ -24,6 +25,7 @@
 				label: 'CPP',
 				max: cpp.maxEmployee,
 				maxed: data.cppMaxed,
+				total: data.totalCPP,
 				color: '#ffa726',
 				detail: `${(cpp.rate * 100).toFixed(2)}% on $${cpp.exemption.toLocaleString()} – $${cpp.ympe.toLocaleString()}`
 			},
@@ -31,20 +33,33 @@
 				label: 'CPP2',
 				max: cpp2.maxEmployee,
 				maxed: data.cpp2Maxed,
+				total: data.totalCPP2,
 				color: '#ffcc80',
 				detail: `${(cpp2.rate * 100).toFixed(1)}% on $${cpp2.floor.toLocaleString()} – $${cpp2.yampe.toLocaleString()}`
 			}
 		];
 	});
 
+	// Contributions charged at this salary, and those that never reach their maximum
+	let charged = $derived(milestones.filter((m) => m.total > 0));
+	let unmaxed = $derived(charged.filter((m) => m.maxed === null));
+
 	let lastMaxed = $derived(
-		[data.eiMaxed, data.cppMaxed, data.cpp2Maxed]
+		charged
+			.map((m) => m.maxed)
 			.filter((m): m is PeriodMarker => m !== null)
 			.reduce<PeriodMarker | null>((a, b) => (a && a.period >= b.period ? a : b), null)
 	);
 
-	function describe(m: PeriodMarker | null): string {
-		return m ? `${m.date.label} cheque (${m.period} of ${data.periods.length})` : 'not reached';
+	function status(m: { maxed: PeriodMarker | null; total: number }): string {
+		if (m.maxed)
+			return `reached on the ${m.maxed.date.label} cheque (${m.maxed.period} of ${data.periods.length})`;
+		if (m.total === 0) return 'not charged at this salary';
+		return `not reached — $${fmt(m.total)} this year`;
+	}
+
+	function joinNames(names: string[]): string {
+		return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0];
 	}
 </script>
 
@@ -63,8 +78,8 @@
 				</span>
 				<div>
 					<div style="font-size: 13px; color: #c0c0d0;">
-						Max <strong>${fmt(item.max)}</strong> — reached on the
-						<strong style="color: {item.color};">{describe(item.maxed)}</strong>
+						Max <strong>${fmt(item.max)}</strong> —
+						<strong style="color: {item.color};">{status(item)}</strong>
 					</div>
 					<div style="font-size: 11px; color: #50546a; margin-top: 2px;">{item.detail}</div>
 				</div>
@@ -84,14 +99,20 @@
 		<strong style="color: #66bb6a;">
 			${fmt(data.totalCPP + data.totalCPP2 + data.totalEI)}
 		</strong>
-		{#if lastMaxed}
+		{#if unmaxed.length > 0}
+			— {joinNames(unmaxed.map((m) => m.label))}
+			{unmaxed.length === 1 ? "doesn't" : "don't"} reach the maximum at this salary, so
+			{unmaxed.length === 1 ? 'it comes' : 'they come'} off every cheque all year.
+		{:else if lastMaxed && lastMaxed.period < data.periods.length}
 			— all maxed by the
 			<strong style="color: #66bb6a;">{lastMaxed.date.label}</strong> cheque, then take-home rises
 			by
 			<strong style="color: #66bb6a;">
 				~${fmt(data.lateMonthlyNet - data.earlyMonthlyNet)}/mo
 			</strong>
-			(income tax withheld goes up a little once CPP and EI stop)
+			(already net of a little extra income tax, since the enhanced CPP and CPP2 deductions stop too)
+		{:else if lastMaxed}
+			— maxed on the final cheque of the year.
 		{/if}
 	</div>
 </div>

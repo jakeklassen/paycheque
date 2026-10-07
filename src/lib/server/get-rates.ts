@@ -31,7 +31,7 @@ function parseSavedInputs(raw: string | undefined): SavedInputs | null {
 			rrsp: parsed.rrsp,
 			province: typeof parsed.province === 'string' ? (parsed.province as ProvinceCode) : 'ON',
 			frequency:
-				typeof parsed.frequency === 'string' && parsed.frequency in PAY_FREQUENCIES
+				typeof parsed.frequency === 'string' && Object.hasOwn(PAY_FREQUENCIES, parsed.frequency)
 					? parsed.frequency
 					: 'biweekly'
 		};
