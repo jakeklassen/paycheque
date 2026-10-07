@@ -34,7 +34,7 @@
 
 	let sim = $derived(simulate(salary, rrspWeekly, province, config));
 
-	const currentYear = new Date().getFullYear();
+	let currentYear = $derived(data.currentYear);
 </script>
 
 <div
