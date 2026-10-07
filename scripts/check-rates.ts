@@ -189,20 +189,22 @@ function parseOtherTable(rows: string[][]): Map<string, OtherAmounts> {
 	return out;
 }
 
-/** "Where NI* ≤ $X, NAME = $Y" … "Where NI* ≥ $Z, NAME = $W" */
+/** "Where NI* ≤ $X, NAME = $Y" … "Where NI* ≥ $Z, NAME = $W"; null unless fully parsed */
 function parseBpaFormula(text: string, name: string) {
-	const low = text.match(new RegExp(`Where NI\\* ≤ \\$([\\d,]+), ${name} = \\$([\\d,]+)`));
-	const high = text.match(new RegExp(`Where NI\\* ≥ \\$([\\d,]+), ${name} = \\$([\\d,]+)`));
+	const low = text.match(new RegExp(`Where NI\\*? ≤ \\$([\\d,]+), ${name} = \\$([\\d,]+)`));
+	const high = text.match(new RegExp(`Where NI\\*? ≥ \\$([\\d,]+), ${name} = \\$([\\d,]+)`));
+	if (!low || !high) return null;
 	return {
-		amountMax: num(low?.[2]),
-		start: num(low?.[1]),
-		end: num(high?.[1]),
-		amountMin: num(high?.[2])
+		amountMax: num(low[2]),
+		start: num(low[1]),
+		end: num(high[1]),
+		amountMin: num(high[2])
 	};
 }
 
 type ReductionFormula =
-	{ kind: 'ontario' } | { kind: 'income-tested'; threshold: number; rate: number };
+	| { kind: 'ontario'; multiplier: number }
+	| { kind: 'income-tested'; threshold: number; rate: number };
 
 /** Which factor S formula a province section uses, with its threshold and rate */
 function parseReduction(text: string): ReductionFormula | null {
@@ -215,7 +217,8 @@ function parseReduction(text: string): ReductionFormula | null {
 			rate: num(rate?.[1]) / 100
 		};
 	}
-	if (/\[2 × \(\$[\d,]+ \+ Y\)\]/.test(text)) return { kind: 'ontario' };
+	const ontario = text.match(/\[(\d+) × \(\$[\d,]+ \+ Y\)\]/);
+	if (ontario) return { kind: 'ontario', multiplier: num(ontario[1]) };
 	return null;
 }
 
@@ -362,19 +365,53 @@ class Sources {
 		return [];
 	}
 
-	/** First edition whose `pick` result satisfies `found` */
-	first<T>(pick: (ed: Edition) => T, found: (value: T) => boolean): T {
-		let value = pick(this.editions[0]);
+	/**
+	 * Find a formula in the latest edition that contains it, falling back to
+	 * January only when the latest edition doesn't reprint it. Once an edition
+	 * contains the formula its version is authoritative: if it can't be parsed,
+	 * that's recorded as unverified rather than falling back.
+	 *
+	 * @param locate the text holding the formula, or null if the edition lacks it
+	 * @returns the parsed formula; null if present but unparsable; undefined if absent
+	 */
+	formula<T>(
+		label: string,
+		locate: (ed: Edition) => string | null,
+		parse: (text: string) => T | null
+	): T | null | undefined {
 		for (const ed of this.editions) {
-			value = pick(ed);
-			if (found(value)) return value;
+			const text = locate(ed);
+			if (text === null) continue;
+			const parsed = parse(text);
+			if (parsed === null) unverified.push(`${label} in ${ed.title} (present but not parsable)`);
+			return parsed;
 		}
-		return value;
+		return undefined;
 	}
+}
 
-	section(name: string, found: (text: string) => boolean): string {
-		return this.first((ed) => ed.sections.get(name) ?? '', found);
-	}
+/** Text of the section whose heading contains `heading` */
+function sectionContaining(ed: Edition, heading: string): string | null {
+	for (const [name, text] of ed.sections) if (name.includes(heading)) return text;
+	return null;
+}
+
+/** A province's own section, when it defines `marker` */
+function provinceSection(ed: Edition, name: string, marker: RegExp): string | null {
+	const text = ed.sections.get(name);
+	return text && marker.test(text) ? text : null;
+}
+
+/** A required basic personal amount formula; missing from every edition is unverified too */
+function bpaFormula(src: Sources, name: string) {
+	const label = `${name} formula`;
+	const formula = src.formula(
+		label,
+		(ed) => sectionContaining(ed, `(${name}) Formula`),
+		(t) => parseBpaFormula(t, name)
+	);
+	if (formula === undefined) unverified.push(`${label} (not found in any edition)`);
+	return formula ?? { amountMax: NaN, amountMin: NaN, start: NaN, end: NaN };
 }
 
 async function main() {
@@ -429,10 +466,7 @@ async function main() {
 	// Federal
 	const fed = 'Federal';
 	compareBrackets(fed, 'Federal', FALLBACK_CONFIG.federalBrackets, rates.get('Federal'));
-	const bpaf = src.first(
-		(ed) => parseBpaFormula(ed.text, 'BPAF'),
-		(f) => !Number.isNaN(f.amountMax)
-	);
+	const bpaf = bpaFormula(src, 'BPAF');
 	const fp = FALLBACK_CONFIG.federalPersonal;
 	compare(fed, 'Federal basic personal amount', fp.amountMax, bpaf.amountMax);
 	compare(fed, 'Federal basic personal amount minimum', fp.amountMin, bpaf.amountMin);
@@ -450,11 +484,13 @@ async function main() {
 	checkContributions(src);
 
 	// Provinces
-	const bpamb = src.first(
-		(ed) => parseBpaFormula(ed.text, 'BPAMB'),
-		(f) => !Number.isNaN(f.amountMax)
+	const bpamb = bpaFormula(src, 'BPAMB');
+	// The latest edition that defines BPAYT decides whether it still mirrors BPAF
+	const yukonMirrorsFederal = src.formula(
+		'BPAYT formula',
+		(ed) => sectionContaining(ed, '(BPAYT) Formula'),
+		(t) => /BPAYT\s*=\s*BPAF/.test(t)
 	);
-	const yukonMirrorsFederal = src.editions.some((ed) => /BPAYT\s*=\s*BPAF/.test(ed.text));
 	for (const code of PROVINCES) {
 		const extras = PROVINCE_EXTRAS[code];
 		const section = 'Personal amounts';
@@ -463,12 +499,12 @@ async function main() {
 
 		if (amounts?.basic === 'BPAMB' || amounts?.basic === 'BPAYT') {
 			const formula = amounts.basic === 'BPAMB' ? bpamb : bpaf;
-			if (amounts.basic === 'BPAYT' && !yukonMirrorsFederal) {
+			if (amounts.basic === 'BPAYT' && yukonMirrorsFederal !== true) {
 				mismatches.push({
 					section,
 					item: `${code} basic personal amount`,
 					code: 'mirrors federal',
-					cra: '"BPAYT = BPAF" not found; read the BPAYT formula'
+					cra: '"BPAYT = BPAF" is not in the latest BPAYT formula; read it and update YT'
 				});
 			}
 			compare(section, `${code} basic personal amount`, extras.personalAmount, formula.amountMax);
@@ -544,8 +580,13 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 	// section, basic amount from Table 8.2 (S2)
 	const section = 'Tax reductions';
 	const reduction = extras.taxReduction;
-	const formula = parseReduction(src.section(extras.name, (t) => parseReduction(t) !== null));
-	if (!formula && Number.isNaN(amounts.s2)) {
+	const formula = src.formula(
+		`${code} tax reduction (factor S)`,
+		(ed) => provinceSection(ed, extras.name, /(?:^|\s)S\s*=/),
+		parseReduction
+	);
+	if (formula === null) return; // present but not parsable: already unverified
+	if (formula === undefined && Number.isNaN(amounts.s2)) {
 		if (reduction) {
 			mismatches.push({
 				section,
@@ -578,6 +619,10 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 	}
 	pass(section);
 	compare(section, `${code} tax reduction basic amount`, reduction.basic, amounts.s2);
+	if (formula.kind === 'ontario') {
+		// calcTaxReduction applies the ontario kind as 2 × basic
+		compare(section, `${code} tax reduction multiplier`, 2, formula.multiplier, String);
+	}
 	if (reduction.kind === 'income-tested' && formula.kind === 'income-tested') {
 		compare(section, `${code} tax reduction threshold`, reduction.threshold, formula.threshold);
 		compare(section, `${code} tax reduction rate`, reduction.rate, formula.rate, pct);
@@ -586,16 +631,18 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 
 function checkHealthPremium(src: Sources) {
 	const section = 'Ontario Health Premium';
-	const tiers = parseHealthPremium(src.section('Ontario', (t) => parseHealthPremium(t).length > 0));
-	if (tiers.length === 0) {
-		mismatches.push({
-			section,
-			item: 'V2 formula',
-			code: '—',
-			cra: 'not found (has the CRA page changed?)'
-		});
-		return;
+	const tiers = src.formula(
+		'Ontario Health Premium (V2) formula',
+		(ed) => provinceSection(ed, 'Ontario', /V2 =/),
+		(t) => {
+			const parsed = parseHealthPremium(t);
+			return parsed.length > 0 ? parsed : null;
+		}
+	);
+	if (tiers === undefined) {
+		unverified.push('Ontario Health Premium (V2) formula (not found in any edition)');
 	}
+	if (!tiers) return;
 	const config = { ...FALLBACK_CONFIG } as RateConfig;
 	for (let income = 0; income <= 300_000; income += 50) {
 		const code = calcHealthPremium(income, 'ON', config);
@@ -618,24 +665,28 @@ async function checkRatesPage(year: number) {
 		unverified.push(`CRA's public rates page (${(err as Error).message})`);
 		return;
 	}
+	// Federal brackets are still checked when the page has no provincial ones yet
 	if (Object.keys(scraped.provinces).length === 0) {
-		notes.push(
-			`CRA's public rates page has no ${year} brackets yet; the app will use fallback data.`
-		);
-		return;
+		notes.push(`CRA's public rates page has no ${year} provincial brackets yet.`);
 	}
-	const pairs: [string, readonly TaxBracket[] | undefined, readonly TaxBracket[], boolean][] = [
-		['Federal', scraped.federal, FALLBACK_CONFIG.federalBrackets, false],
-		...PROVINCES.map(
-			(code) =>
-				[
-					code,
-					scraped.provinces[code],
-					FALLBACK_PROVINCE_BRACKETS[code],
-					code in PROVINCE_BRACKET_OVERRIDES
-				] as [string, readonly TaxBracket[] | undefined, readonly TaxBracket[], boolean]
-		)
-	];
+	if (scraped.federal.length === 0) {
+		notes.push(`CRA's public rates page has no ${year} federal brackets yet.`);
+	}
+	type Pair = [string, readonly TaxBracket[] | undefined, readonly TaxBracket[], boolean];
+	const pairs: Pair[] = [];
+	if (scraped.federal.length > 0) {
+		pairs.push(['Federal', scraped.federal, FALLBACK_CONFIG.federalBrackets, false]);
+	}
+	if (Object.keys(scraped.provinces).length > 0) {
+		for (const code of PROVINCES) {
+			pairs.push([
+				code,
+				scraped.provinces[code],
+				FALLBACK_PROVINCE_BRACKETS[code],
+				code in PROVINCE_BRACKET_OVERRIDES
+			]);
+		}
+	}
 	for (const [label, live, verified, overridden] of pairs) {
 		const matches = live !== undefined && bracketsEqual(live, verified);
 		if (overridden && matches) {
