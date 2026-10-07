@@ -1,5 +1,5 @@
 import type { ProvinceCode, RateConfig } from '#lib/types.js';
-import { FALLBACK_CONFIG, PROVINCE_EXTRAS } from '#lib/constants.js';
+import { FALLBACK_CONFIG, PROVINCE_BRACKET_OVERRIDES, PROVINCE_EXTRAS } from '#lib/constants.js';
 import { fetchTaxBrackets } from './tax-brackets';
 import { fetchCppRates } from './cpp-rates';
 import { fetchEiRates } from './ei-rates';
@@ -26,13 +26,7 @@ export async function scrapeAllRates(year: number): Promise<RateConfig> {
 		const extras = PROVINCE_EXTRAS[code as ProvinceCode];
 		if (!extras) continue;
 
-		provinces[code] = {
-			name: extras.name,
-			brackets: scrapedBrackets,
-			personalAmount: extras.personalAmount,
-			surtax: extras.surtax,
-			healthPremiumTiers: extras.healthPremiumTiers
-		};
+		provinces[code] = { ...extras, brackets: scrapedBrackets };
 	}
 
 	// Include provinces not available from scraper (Quebec, plus any fallback-only)
@@ -58,4 +52,19 @@ export async function scrapeAllRates(year: number): Promise<RateConfig> {
 			stale: false
 		}
 	};
+}
+
+/**
+ * Re-apply hand-maintained values (personal amounts, surtaxes, bracket
+ * overrides, federal personal amount) on top of scraped or cached data, so
+ * corrections in constants.ts take effect without waiting for a re-scrape.
+ */
+export function applyHandMaintainedRates(config: RateConfig): RateConfig {
+	const provinces: RateConfig['provinces'] = {};
+	for (const [code, prov] of Object.entries(config.provinces)) {
+		const extras = PROVINCE_EXTRAS[code as ProvinceCode];
+		const brackets = PROVINCE_BRACKET_OVERRIDES[code as ProvinceCode] ?? prov.brackets;
+		provinces[code] = extras ? { ...extras, brackets } : { ...prov, brackets };
+	}
+	return { ...config, federalPersonal: FALLBACK_CONFIG.federalPersonal, provinces };
 }

@@ -16,11 +16,21 @@ export interface HealthPremiumTier {
 	readonly marginalBase: number;
 }
 
+/** Linear reduction of a basic personal amount between two income thresholds */
+export interface PersonalAmountClawback {
+	readonly amountMin: number;
+	readonly start: number;
+	readonly end: number;
+}
+
 export interface ProvinceConfig {
 	readonly name: string;
 	readonly brackets: readonly TaxBracket[];
 	readonly personalAmount: number;
+	readonly personalAmountClawback?: PersonalAmountClawback;
 	readonly surtax?: readonly SurtaxBracket[];
+	/** Ontario tax reduction basic amount (T4127 S2) */
+	readonly taxReductionBasic?: number;
 	readonly healthPremiumTiers?: readonly HealthPremiumTier[];
 }
 
@@ -52,6 +62,13 @@ export interface FederalPersonal {
 	readonly amountMin: number;
 	readonly clawbackStart: number;
 	readonly clawbackEnd: number;
+}
+
+/** Amounts (not credit values) eligible for non-refundable tax credits */
+export interface TaxCredits {
+	readonly cppBase: number;
+	readonly ei: number;
+	readonly employmentAmount: number;
 }
 
 export interface RateMeta {

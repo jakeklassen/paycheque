@@ -77,6 +77,6 @@
 
 		<AnnualBreakdown {salary} {province} data={sim} {config} />
 
-		<Sources {config} />
+		<Sources {config} {province} />
 	</div>
 </div>

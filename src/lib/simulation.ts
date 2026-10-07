@@ -1,4 +1,5 @@
-import type { MonthData, RateConfig, SimulationResult, WeekData } from './types';
+import type { MonthData, RateConfig, SimulationResult, TaxCredits, WeekData } from './types';
+import { CANADA_EMPLOYMENT_AMOUNT, CPP_ENHANCED_RATE } from './constants';
 import { calcFederalTax, calcHealthPremium, calcProvincialTax } from './tax';
 
 const MONTH_NAMES = [
@@ -28,17 +29,36 @@ export function simulate(
 ): SimulationResult {
 	const weeklyGross = annualGross / 52;
 	const annualRRSP = rrspWeekly * 52;
-	const taxableIncome = Math.max(0, annualGross - annualRRSP);
-
-	const federalTax = calcFederalTax(taxableIncome, config);
-	const provincialTax = calcProvincialTax(taxableIncome, province, config);
-	const healthPremium = calcHealthPremium(taxableIncome, province, config);
-	const totalAnnualTax = federalTax + provincialTax + healthPremium;
-	const weeklyTax = totalAnnualTax / 52;
 
 	// Quebec uses different EI rates
 	const ei = province === 'QC' ? config.eiQuebec : config.ei;
 	const { cpp, cpp2 } = config;
+
+	// Full-year contributions drive the tax deductions and credits
+	const annualCPP = Math.min(
+		Math.max(0, Math.min(annualGross, cpp.ympe) - cpp.exemption) * cpp.rate,
+		cpp.maxEmployee
+	);
+	const annualCPP2 = Math.min(
+		Math.max(0, Math.min(annualGross, cpp2.yampe) - cpp2.floor) * cpp2.rate,
+		cpp2.maxEmployee
+	);
+	const annualEI = Math.min(Math.min(annualGross, ei.mie) * ei.rate, ei.maxEmployee);
+	const cppEnhanced = annualCPP * (CPP_ENHANCED_RATE / cpp.rate);
+
+	// Enhanced CPP and all of CPP2 are deductions; base CPP and EI are credits
+	const taxableIncome = Math.max(0, annualGross - annualRRSP - cppEnhanced - annualCPP2);
+	const credits: TaxCredits = {
+		cppBase: annualCPP - cppEnhanced,
+		ei: annualEI,
+		employmentAmount: Math.min(CANADA_EMPLOYMENT_AMOUNT, annualGross)
+	};
+
+	const federalTax = calcFederalTax(taxableIncome, province, credits, config);
+	const provincialTax = calcProvincialTax(taxableIncome, province, credits, config);
+	const healthPremium = calcHealthPremium(taxableIncome, province, config);
+	const totalAnnualTax = federalTax + provincialTax + healthPremium;
+	const weeklyTax = totalAnnualTax / 52;
 
 	// Week-by-week CPP/CPP2/EI simulation
 	const weeks: WeekData[] = [];
@@ -92,8 +112,9 @@ export function simulate(
 		});
 	}
 
-	// Aggregate to months using uniform month length (365/12 days each)
-	const uniformDays = 365 / 12;
+	// Aggregate to months using uniform month length. 52 weeks span 364 days,
+	// so months must split 364 days for monthly nets to sum to the annual net.
+	const uniformDays = (52 * 7) / 12;
 	const months: MonthData[] = [];
 
 	for (let m = 0; m < 12; m++) {

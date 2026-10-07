@@ -1,7 +1,7 @@
 import type { ProvinceCode, RateConfig } from '#lib/types.js';
 import { FALLBACK_CONFIG } from '#lib/constants.js';
 import { readCache, writeCache } from './cache';
-import { scrapeAllRates } from './scraper';
+import { applyHandMaintainedRates, scrapeAllRates } from './scraper';
 
 export interface SavedInputs {
 	salary: number;
@@ -41,19 +41,19 @@ export async function getRates(cookieValue: string | undefined): Promise<LoaderD
 
 	// Fresh cache — return immediately
 	if (cached?.fresh) {
-		return { config: cached.config, savedInputs };
+		return { config: applyHandMaintainedRates(cached.config), savedInputs };
 	}
 
 	// Stale cache — return immediately, refresh in background
 	if (cached) {
 		refreshInBackground();
-		return { config: cached.config, savedInputs };
+		return { config: applyHandMaintainedRates(cached.config), savedInputs };
 	}
 
 	// No cache at all — return fallback, scrape in background for next request
 	refreshInBackground();
 	return {
-		config: JSON.parse(JSON.stringify(FALLBACK_CONFIG)) as RateConfig,
+		config: applyHandMaintainedRates(JSON.parse(JSON.stringify(FALLBACK_CONFIG)) as RateConfig),
 		savedInputs
 	};
 }

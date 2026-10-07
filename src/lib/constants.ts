@@ -12,6 +12,12 @@ export const NO_LIMIT = 1e15;
 
 export const YEAR = 2026;
 
+/** Enhanced ("first additional") CPP rate — deducted from income rather than credited */
+export const CPP_ENHANCED_RATE = 0.01;
+
+/** Federal Canada employment amount (non-refundable credit, 2026) */
+export const CANADA_EMPLOYMENT_AMOUNT = 1_501;
+
 // ---------------------------------------------------------------------------
 // Province metadata: names, personal amounts, surtaxes, health premiums.
 // Brackets come from the scraper; these extras are hardcoded.
@@ -36,35 +42,94 @@ const ONTARIO_SURTAX: readonly SurtaxBracket[] = [
 	{ threshold: 7_446, rate: 0.36 }
 ];
 
-/** Province-specific extras used to enrich scraped bracket data */
+/**
+ * Province-specific extras used to enrich scraped bracket data.
+ * Personal amounts: CRA T4127 (122nd ed., Jan 2026) Table 8.2, except NL, whose
+ * $13,094 was announced Apr 29, 2026 (T4127 123rd ed., Jul 2026), and QC, which
+ * is from Quebec Finance's 2026 personal income tax parameters.
+ */
 export const PROVINCE_EXTRAS: Record<ProvinceCode, Omit<ProvinceConfig, 'brackets'>> = {
-	AB: { name: 'Alberta', personalAmount: 22_323 },
-	BC: { name: 'British Columbia', personalAmount: 12_580 },
-	MB: { name: 'Manitoba', personalAmount: 15_780 },
-	NB: { name: 'New Brunswick', personalAmount: 13_044 },
-	NL: { name: 'Newfoundland and Labrador', personalAmount: 10_818 },
-	NS: { name: 'Nova Scotia', personalAmount: 8_481 },
-	NT: { name: 'Northwest Territories', personalAmount: 17_373 },
-	NU: { name: 'Nunavut', personalAmount: 18_767 },
+	AB: { name: 'Alberta', personalAmount: 22_769 },
+	BC: { name: 'British Columbia', personalAmount: 13_216 },
+	MB: {
+		name: 'Manitoba',
+		personalAmount: 15_780,
+		personalAmountClawback: { amountMin: 0, start: 200_000, end: 400_000 }
+	},
+	NB: { name: 'New Brunswick', personalAmount: 13_664 },
+	NL: { name: 'Newfoundland and Labrador', personalAmount: 13_094 },
+	NS: { name: 'Nova Scotia', personalAmount: 11_932 },
+	NT: { name: 'Northwest Territories', personalAmount: 18_198 },
+	NU: { name: 'Nunavut', personalAmount: 19_659 },
 	ON: {
 		name: 'Ontario',
 		personalAmount: 12_989,
 		surtax: ONTARIO_SURTAX,
+		taxReductionBasic: 300,
 		healthPremiumTiers: ONTARIO_HEALTH_PREMIUM
 	},
-	PE: {
-		name: 'Prince Edward Island',
-		personalAmount: 13_500,
-		surtax: [{ threshold: 12_500, rate: 0.1 }]
-	},
-	QC: { name: 'Quebec', personalAmount: 18_056 },
-	SK: { name: 'Saskatchewan', personalAmount: 18_491 },
-	YT: { name: 'Yukon', personalAmount: 16_452 }
+	PE: { name: 'Prince Edward Island', personalAmount: 15_000 },
+	QC: { name: 'Quebec', personalAmount: 18_952 },
+	SK: { name: 'Saskatchewan', personalAmount: 20_381 },
+	// Yukon's basic personal amount mirrors the federal one, including its clawback
+	YT: {
+		name: 'Yukon',
+		personalAmount: 16_452,
+		personalAmountClawback: { amountMin: 14_829, start: 181_440, end: 258_482 }
+	}
 };
 
 // ---------------------------------------------------------------------------
-// Fallback bracket data (CRA-confirmed 2026 for Ontario; approximate for
-// other provinces). The scraper replaces these with fresh CRA data.
+// Bracket overrides: legislated 2026 changes that CRA's public tax-rates page
+// (the scraper's source) does not yet reflect. Annual values from T4127
+// 123rd ed. (Jul 2026); the prorated July–December payroll rates are not used.
+// ---------------------------------------------------------------------------
+
+/** BC raised its lowest rate from 5.06% to 5.60% for 2026 (announced Feb 17, 2026) */
+const BC_BRACKETS: readonly TaxBracket[] = [
+	{ min: 0, max: 50_363, rate: 0.056 },
+	{ min: 50_363, max: 100_728, rate: 0.077 },
+	{ min: 100_728, max: 115_648, rate: 0.105 },
+	{ min: 115_648, max: 140_430, rate: 0.1229 },
+	{ min: 140_430, max: 190_405, rate: 0.147 },
+	{ min: 190_405, max: 265_545, rate: 0.168 },
+	{ min: 265_545, max: NO_LIMIT, rate: 0.205 }
+];
+
+/**
+ * PEI added a 20% bracket over $200,000 for 2026 (announced Apr 14, 2026).
+ * CRA's tax-rates page also lists the 19% threshold as $142,250; T4127 has $142,520.
+ */
+const PEI_BRACKETS: readonly TaxBracket[] = [
+	{ min: 0, max: 33_928, rate: 0.095 },
+	{ min: 33_928, max: 65_820, rate: 0.1347 },
+	{ min: 65_820, max: 106_890, rate: 0.166 },
+	{ min: 106_890, max: 142_520, rate: 0.1762 },
+	{ min: 142_520, max: 200_000, rate: 0.19 },
+	{ min: 200_000, max: NO_LIMIT, rate: 0.2 }
+];
+
+/** Quebec brackets (Revenu Québec, not on CRA) — Quebec Finance 2026 parameters */
+const QUEBEC_BRACKETS: readonly TaxBracket[] = [
+	{ min: 0, max: 54_345, rate: 0.14 },
+	{ min: 54_345, max: 108_680, rate: 0.19 },
+	{ min: 108_680, max: 132_245, rate: 0.24 },
+	{ min: 132_245, max: NO_LIMIT, rate: 0.2575 }
+];
+
+/** Brackets that take precedence over scraped (or cached) data */
+export const PROVINCE_BRACKET_OVERRIDES: Partial<Record<ProvinceCode, readonly TaxBracket[]>> = {
+	BC: BC_BRACKETS,
+	PE: PEI_BRACKETS,
+	QC: QUEBEC_BRACKETS
+};
+
+/** Federal tax reduction for Quebec residents (T4127 Table 8.2) */
+export const QUEBEC_ABATEMENT = 0.165;
+
+// ---------------------------------------------------------------------------
+// Fallback bracket data (CRA T4127 2026). The scraper replaces these with
+// fresh CRA data.
 // ---------------------------------------------------------------------------
 
 const FEDERAL_BRACKETS: readonly TaxBracket[] = [
@@ -81,14 +146,6 @@ const ONTARIO_BRACKETS: readonly TaxBracket[] = [
 	{ min: 107_785, max: 150_000, rate: 0.1116 },
 	{ min: 150_000, max: 220_000, rate: 0.1216 },
 	{ min: 220_000, max: NO_LIMIT, rate: 0.1316 }
-];
-
-// Quebec brackets (Revenu Quebec, not on CRA) — approximate 2026
-const QUEBEC_BRACKETS: readonly TaxBracket[] = [
-	{ min: 0, max: 53_255, rate: 0.14 },
-	{ min: 53_255, max: 106_495, rate: 0.19 },
-	{ min: 106_495, max: 129_590, rate: 0.24 },
-	{ min: 129_590, max: NO_LIMIT, rate: 0.2575 }
 ];
 
 /** Complete fallback config — used when scraping fails entirely */
