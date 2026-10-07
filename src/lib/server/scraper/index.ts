@@ -1,5 +1,5 @@
-import type { ProvinceCode, RateConfig } from '$lib/types';
-import { FALLBACK_CONFIG, PROVINCE_EXTRAS } from '$lib/constants';
+import type { ProvinceCode, RateConfig } from '#lib/types.js';
+import { FALLBACK_CONFIG, PROVINCE_EXTRAS } from '#lib/constants.js';
 import { fetchTaxBrackets } from './tax-brackets';
 import { fetchCppRates } from './cpp-rates';
 import { fetchEiRates } from './ei-rates';

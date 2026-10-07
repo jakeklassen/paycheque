@@ -1,6 +1,6 @@
 import { load } from 'cheerio';
-import type { ProvinceCode, TaxBracket } from '$lib/types';
-import { NO_LIMIT } from '$lib/constants';
+import type { ProvinceCode, TaxBracket } from '#lib/types.js';
+import { NO_LIMIT } from '#lib/constants.js';
 import { fetchWithTimeout } from './parse-utils';
 
 const API_URL = 'https://www.canada.ca/api/assets/cra-arc/content-fragments/income-tax-rates.json';

@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { ProvinceCode, ProvinceConfig } from '$lib/types';
-	import { cardStyle, labelStyle } from '$lib/styles';
+	import type { ProvinceCode, ProvinceConfig } from '#lib/types.js';
+	import { cardStyle, labelStyle } from '#lib/styles.js';
 	import CurrencyInput from './CurrencyInput.svelte';
 	import ProvinceDropdown from './ProvinceDropdown.svelte';
 

@@ -1,14 +1,14 @@
 <script lang="ts">
-	import type { ProvinceCode } from '$lib/types';
-	import { simulate } from '$lib/simulation';
-	import { monoFont } from '$lib/styles';
-	import InputSection from '$lib/components/calculator/InputSection.svelte';
-	import StatCards from '$lib/components/calculator/StatCards.svelte';
-	import DeductionMilestones from '$lib/components/calculator/DeductionMilestones.svelte';
-	import MonthlyChart from '$lib/components/calculator/MonthlyChart.svelte';
-	import AnnualBreakdown from '$lib/components/calculator/AnnualBreakdown.svelte';
-	import Sources from '$lib/components/calculator/Sources.svelte';
-	import { browser } from '$app/environment';
+	import type { ProvinceCode } from '#lib/types.js';
+	import { simulate } from '#lib/simulation.js';
+	import { monoFont } from '#lib/styles.js';
+	import InputSection from '#lib/components/calculator/InputSection.svelte';
+	import StatCards from '#lib/components/calculator/StatCards.svelte';
+	import DeductionMilestones from '#lib/components/calculator/DeductionMilestones.svelte';
+	import MonthlyChart from '#lib/components/calculator/MonthlyChart.svelte';
+	import AnnualBreakdown from '#lib/components/calculator/AnnualBreakdown.svelte';
+	import Sources from '#lib/components/calculator/Sources.svelte';
+	import { browser } from '$app/env';
 	import { untrack } from 'svelte';
 
 	const COOKIE_NAME = 'calc-inputs';

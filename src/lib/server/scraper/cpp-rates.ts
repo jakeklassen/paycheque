@@ -1,5 +1,5 @@
 import { load } from 'cheerio';
-import type { CppRates, Cpp2Rates } from '$lib/types';
+import type { CppRates, Cpp2Rates } from '#lib/types.js';
 import { fetchWithTimeout, parseDollar, parseRate } from './parse-utils';
 
 const CPP_URL =

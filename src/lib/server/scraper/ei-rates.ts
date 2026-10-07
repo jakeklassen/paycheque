@@ -1,5 +1,5 @@
 import { load } from 'cheerio';
-import type { EiRates } from '$lib/types';
+import type { EiRates } from '#lib/types.js';
 import { fetchWithTimeout, parseDollar, parseRate } from './parse-utils';
 
 const EI_URL =

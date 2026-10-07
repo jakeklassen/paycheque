@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { monoFont } from '$lib/styles';
+	import { monoFont } from '#lib/styles.js';
 
 	interface Props {
 		value: number;

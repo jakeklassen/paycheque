@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { fmt } from '$lib/format';
-	import { cardStyle, labelStyle, monoFont } from '$lib/styles';
+	import { fmt } from '#lib/format.js';
+	import { cardStyle, labelStyle, monoFont } from '#lib/styles.js';
 
 	interface Props {
 		earlyMonthlyNet: number;

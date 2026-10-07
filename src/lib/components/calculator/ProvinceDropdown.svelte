@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { ProvinceCode, ProvinceConfig } from '$lib/types';
-	import { monoFont } from '$lib/styles';
+	import type { ProvinceCode, ProvinceConfig } from '#lib/types.js';
+	import { monoFont } from '#lib/styles.js';
 
 	interface Props {
 		value: ProvinceCode;

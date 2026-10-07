@@ -1,5 +1,5 @@
-import type { ProvinceCode, RateConfig } from '$lib/types';
-import { FALLBACK_CONFIG } from '$lib/constants';
+import type { ProvinceCode, RateConfig } from '#lib/types.js';
+import { FALLBACK_CONFIG } from '#lib/constants.js';
 import { readCache, writeCache } from './cache';
 import { scrapeAllRates } from './scraper';
 

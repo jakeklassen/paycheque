@@ -1,7 +1,7 @@
 <script lang="ts">
-	import type { RateConfig, SimulationResult } from '$lib/types';
-	import { fmt, weekToDate } from '$lib/format';
-	import { cardStyle, monoFont } from '$lib/styles';
+	import type { RateConfig, SimulationResult } from '#lib/types.js';
+	import { fmt, weekToDate } from '#lib/format.js';
+	import { cardStyle, monoFont } from '#lib/styles.js';
 
 	interface Props {
 		data: SimulationResult;

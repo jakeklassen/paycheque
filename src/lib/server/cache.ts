@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { RateConfig } from '$lib/types';
+import type { RateConfig } from '#lib/types.js';
 
 const CACHE_DIR = join(process.cwd(), '.cache');
 const CACHE_FILE = join(CACHE_DIR, 'rates.json');

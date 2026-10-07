@@ -1,7 +1,7 @@
 <script lang="ts">
-	import type { MonthData } from '$lib/types';
-	import { fmt } from '$lib/format';
-	import { cardStyle } from '$lib/styles';
+	import type { MonthData } from '#lib/types.js';
+	import { fmt } from '#lib/format.js';
+	import { cardStyle } from '#lib/styles.js';
 
 	interface Props {
 		months: readonly MonthData[];
