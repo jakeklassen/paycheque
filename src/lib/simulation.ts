@@ -1,5 +1,5 @@
 import type { MonthData, RateConfig, SimulationResult, TaxCredits, WeekData } from './types';
-import { CANADA_EMPLOYMENT_AMOUNT, CPP_ENHANCED_RATE } from './constants';
+import { CPP_ENHANCED_RATE } from './constants';
 import { calcFederalTax, calcHealthPremium, calcProvincialTax } from './tax';
 
 const MONTH_NAMES = [
@@ -51,7 +51,7 @@ export function simulate(
 	const credits: TaxCredits = {
 		cppBase: annualCPP - cppEnhanced,
 		ei: annualEI,
-		employmentAmount: Math.min(CANADA_EMPLOYMENT_AMOUNT, annualGross)
+		employmentIncome: annualGross
 	};
 
 	const federalTax = calcFederalTax(taxableIncome, province, credits, config);

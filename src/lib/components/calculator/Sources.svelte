@@ -167,9 +167,9 @@
 				<span style="color: #c0c0d0;">
 					basic personal amount {dollars(prov.personalAmount)}{prov.personalAmountClawback
 						? ` (reduced to ${dollars(prov.personalAmountClawback.amountMin)} from ${dollars(prov.personalAmountClawback.start)}–${dollars(prov.personalAmountClawback.end)})`
-						: ''}{province === 'QC' ? '' : ' · base CPP and EI contributions'}, at {pct(
-						prov.brackets[0].rate
-					)}
+						: ''}{province === 'QC' ? '' : ' · base CPP and EI contributions'}{prov.employmentAmount
+						? ` · Canada employment amount ${dollars(prov.employmentAmount)}`
+						: ''}, at {pct(prov.brackets[0].rate)}
 				</span>
 			</div>
 			{#if prov.surtax?.length}
@@ -182,11 +182,18 @@
 					</span>
 				</div>
 			{/if}
-			{#if prov.taxReductionBasic}
+			{#if prov.taxReduction}
+				{@const r = prov.taxReduction}
 				<div>
 					{prov.name} tax reduction:
 					<span style="color: #c0c0d0;">
-						{dollars(prov.taxReductionBasic)} basic amount (no dependants)
+						{#if r.kind === 'ontario'}
+							{dollars(r.basic)} basic amount (no dependants)
+						{:else}
+							up to {dollars(r.basic)}, reduced by {pct(r.rate)} of income over {dollars(
+								r.threshold
+							)}
+						{/if}
 					</span>
 				</div>
 			{/if}

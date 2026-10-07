@@ -3,9 +3,10 @@ import type {
 	PersonalAmountClawback,
 	RateConfig,
 	TaxBracket,
-	TaxCredits
+	TaxCredits,
+	TaxReduction
 } from './types';
-import { QUEBEC_ABATEMENT } from './constants';
+import { CANADA_EMPLOYMENT_AMOUNT, QUEBEC_ABATEMENT } from './constants';
 
 export function calcBracketTax(taxableIncome: number, brackets: readonly TaxBracket[]): number {
 	let tax = 0;
@@ -41,7 +42,8 @@ export function calcFederalTax(
 		start: fp.clawbackStart,
 		end: fp.clawbackEnd
 	});
-	const creditBase = personalAmount + credits.cppBase + credits.ei + credits.employmentAmount;
+	const employmentAmount = Math.min(CANADA_EMPLOYMENT_AMOUNT, credits.employmentIncome);
+	const creditBase = personalAmount + credits.cppBase + credits.ei + employmentAmount;
 	const nonRefundableCredits = creditBase * config.federalBrackets[0].rate;
 	const fedTax = Math.max(0, basicTax - nonRefundableCredits);
 
@@ -58,6 +60,15 @@ function calcHealthPremiumFromTiers(income: number, tiers: readonly HealthPremiu
 		}
 	}
 	return tiers[tiers.length - 1].flat;
+}
+
+/** Low-income tax reduction (T4127 factor S), for filers with no dependants */
+function calcTaxReduction(provTax: number, taxableIncome: number, r: TaxReduction): number {
+	const limit =
+		r.kind === 'ontario'
+			? 2 * r.basic - provTax
+			: r.basic - Math.max(0, taxableIncome - r.threshold) * r.rate;
+	return Math.min(provTax, Math.max(0, limit));
 }
 
 export function calcProvincialTax(
@@ -77,7 +88,10 @@ export function calcProvincialTax(
 		prov.personalAmount,
 		prov.personalAmountClawback
 	);
-	const creditBase = personalAmount + contributionAmounts;
+	const employmentAmount = prov.employmentAmount
+		? Math.min(prov.employmentAmount, credits.employmentIncome)
+		: 0;
+	const creditBase = personalAmount + contributionAmounts + employmentAmount;
 	let provTax = Math.max(0, basicTax - creditBase * prov.brackets[0].rate);
 
 	if (prov.surtax) {
@@ -90,10 +104,8 @@ export function calcProvincialTax(
 		provTax += surtax;
 	}
 
-	// Ontario tax reduction (T4127 factor S), for filers with no dependants
-	if (prov.taxReductionBasic) {
-		const reduction = Math.max(0, 2 * prov.taxReductionBasic - provTax);
-		provTax -= Math.min(provTax, reduction);
+	if (prov.taxReduction) {
+		provTax -= calcTaxReduction(provTax, taxableIncome, prov.taxReduction);
 	}
 
 	return provTax;

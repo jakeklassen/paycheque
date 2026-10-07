@@ -23,14 +23,29 @@ export interface PersonalAmountClawback {
 	readonly end: number;
 }
 
+/**
+ * Provincial low-income tax reduction (T4127 factor S).
+ * - ontario: lesser of tax and 2 × basic − tax (no dependants)
+ * - income-tested: basic, reduced by rate × income over threshold
+ */
+export type TaxReduction =
+	| { readonly kind: 'ontario'; readonly basic: number }
+	| {
+			readonly kind: 'income-tested';
+			readonly basic: number;
+			readonly threshold: number;
+			readonly rate: number;
+	  };
+
 export interface ProvinceConfig {
 	readonly name: string;
 	readonly brackets: readonly TaxBracket[];
 	readonly personalAmount: number;
 	readonly personalAmountClawback?: PersonalAmountClawback;
 	readonly surtax?: readonly SurtaxBracket[];
-	/** Ontario tax reduction basic amount (T4127 S2) */
-	readonly taxReductionBasic?: number;
+	readonly taxReduction?: TaxReduction;
+	/** Provincial Canada employment amount (T4127 K4P), where one exists */
+	readonly employmentAmount?: number;
 	readonly healthPremiumTiers?: readonly HealthPremiumTier[];
 }
 
@@ -68,7 +83,8 @@ export interface FederalPersonal {
 export interface TaxCredits {
 	readonly cppBase: number;
 	readonly ei: number;
-	readonly employmentAmount: number;
+	/** Gross employment income, which caps the Canada employment amount */
+	readonly employmentIncome: number;
 }
 
 export interface RateMeta {

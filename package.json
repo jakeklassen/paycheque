@@ -13,7 +13,8 @@
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"test:unit": "vitest",
-		"test": "npm run test:unit -- --run"
+		"test": "npm run test:unit -- --run",
+		"check:rates": "tsx scripts/check-rates.ts"
 	},
 	"devDependencies": {
 		"@eslint/compat": "^2.1.1",
@@ -38,6 +39,7 @@
 		"svelte": "^5.57.2",
 		"svelte-check": "^4.7.6",
 		"tailwindcss": "^4.3.3",
+		"tsx": "^4.23.15",
 		"typescript": "^6.0.3",
 		"typescript-eslint": "^8.71.1",
 		"vite": "^8.3.3",

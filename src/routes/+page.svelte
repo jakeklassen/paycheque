@@ -19,7 +19,12 @@
 
 	let salary = $state(untrack(() => data.savedInputs?.salary ?? 217_703));
 	let rrspWeekly = $state(untrack(() => data.savedInputs?.rrsp ?? 0));
-	let province = $state<ProvinceCode>(untrack(() => data.savedInputs?.province ?? 'ON'));
+	let province = $state<ProvinceCode>(
+		untrack(() => {
+			const saved = data.savedInputs?.province;
+			return saved && data.config.provinces[saved] ? saved : 'ON';
+		})
+	);
 
 	$effect(() => {
 		if (!browser) return;
@@ -28,6 +33,8 @@
 	});
 
 	let sim = $derived(simulate(salary, rrspWeekly, province, config));
+
+	const currentYear = new Date().getFullYear();
 </script>
 
 <div
@@ -54,6 +61,16 @@
 				See how CPP, CPP2 &amp; EI front-load your deductions — and when your take-home pay jumps.
 			</p>
 		</div>
+
+		{#if config.year < currentYear}
+			<div
+				role="status"
+				style="font-size: 13px; color: #ffa726; background: rgba(255,167,38,0.08); border: 1px solid rgba(255,167,38,0.2); border-radius: 8px; padding: 10px 14px; margin-bottom: 24px; line-height: 1.5;"
+			>
+				Rates are from {config.year}. {currentYear} rates haven't been added yet, so these figures may
+				be off.
+			</div>
+		{/if}
 
 		<InputSection
 			{salary}
