@@ -191,8 +191,8 @@ function parseOtherTable(rows: string[][]): Map<string, OtherAmounts> {
 
 /** "Where NI* ≤ $X, NAME = $Y" … "Where NI* ≥ $Z, NAME = $W"; null unless fully parsed */
 function parseBpaFormula(text: string, name: string) {
-	const low = text.match(new RegExp(`Where NI\\*? ≤ \\$([\\d,]+), ${name} = \\$([\\d,]+)`));
-	const high = text.match(new RegExp(`Where NI\\*? ≥ \\$([\\d,]+), ${name} = \\$([\\d,]+)`));
+	const low = text.match(new RegExp(`Where NI\\*? ≤ \\$([\\d,]+), ${name}\\s*=\\s*\\$([\\d,]+)`));
+	const high = text.match(new RegExp(`Where NI\\*? ≥ \\$([\\d,]+), ${name}\\s*=\\s*\\$([\\d,]+)`));
 	if (!low || !high) return null;
 	return {
 		amountMax: num(low[2]),
@@ -231,7 +231,7 @@ interface PremiumTier {
 
 /** Ontario Health Premium (V2): "the lesser of: (i) $cap; (ii) $base + (rate × (A – $start))" */
 function parseHealthPremium(text: string): PremiumTier[] {
-	const from = text.indexOf('V2 = Where A');
+	const from = text.search(/V2\s*=\s*Where A/);
 	if (from === -1) return [];
 	const block = text.slice(from, text.indexOf('Note:', from));
 	const tierPattern =
@@ -489,7 +489,12 @@ async function main() {
 	const yukonMirrorsFederal = src.formula(
 		'BPAYT formula',
 		(ed) => sectionContaining(ed, '(BPAYT) Formula'),
-		(t) => /BPAYT\s*=\s*BPAF/.test(t)
+		(t) => {
+			// Only the plain equality counts; "BPAF + $1,000" and the like don't
+			const rule = t.match(/BPAYT\s*=\s*([^.;]*)/);
+			if (!rule) return null;
+			return /^BPAF\b(?!\s*[-+–×*/(])/.test(rule[1].trim());
+		}
 	);
 	for (const code of PROVINCES) {
 		const extras = PROVINCE_EXTRAS[code];
@@ -633,7 +638,7 @@ function checkHealthPremium(src: Sources) {
 	const section = 'Ontario Health Premium';
 	const tiers = src.formula(
 		'Ontario Health Premium (V2) formula',
-		(ed) => provinceSection(ed, 'Ontario', /V2 =/),
+		(ed) => provinceSection(ed, 'Ontario', /V2\s*=/),
 		(t) => {
 			const parsed = parseHealthPremium(t);
 			return parsed.length > 0 ? parsed : null;
