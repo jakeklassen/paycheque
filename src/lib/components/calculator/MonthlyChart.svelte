@@ -6,9 +6,11 @@
 	interface Props {
 		months: readonly MonthData[];
 		avgMonthlyNet: number;
+		/** Payday assumptions, shown under the chart */
+		note: string;
 	}
 
-	let { months, avgMonthlyNet }: Props = $props();
+	let { months, avgMonthlyNet, note }: Props = $props();
 
 	const MONO = "'Space Mono', monospace";
 
@@ -88,7 +90,7 @@
 
 <div style="{cardStyle} padding: 20px 20px 12px; margin-bottom: 24px;">
 	<h2 style="font-size: 14px; font-weight: 700; margin: 0 0 16px; letter-spacing: 0.5px;">
-		Monthly Net Pay
+		Monthly Take-Home
 	</h2>
 	<div
 		bind:this={container}
@@ -205,7 +207,13 @@
 					0
 				)}px; background: #1a1a2e; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px 16px; font-family: 'DM Sans', sans-serif; font-size: 13px; color: #e0e0e0; line-height: 1.6; pointer-events: none; z-index: 10; min-width: 180px;"
 			>
-				<div style="font-weight: 700; margin-bottom: 4px; color: #fff;">{d.month}</div>
+				<div style="font-weight: 700; margin-bottom: 4px; color: #fff;">
+					{d.month}
+					<span style="font-weight: 400; color: #8b8fa3;">
+						· {d.cheques}
+						{d.cheques === 1 ? 'cheque' : 'cheques'}
+					</span>
+				</div>
 				<div>Gross: <span style="color: #8b8fa3;">${fmt(d.gross)}</span></div>
 				<div>Income Tax: <span style="color: #ff6b6b;">−${fmt(d.tax)}</span></div>
 				<div>CPP: <span style="color: #ffa726;">−${fmt(d.cpp)}</span></div>
@@ -241,7 +249,10 @@
 		</div>
 		<div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #6b6f85;">
 			<div style="width: 12px; height: 2px; background: #ffa726;"></div>
-			Annual average
+			Average month
 		</div>
+	</div>
+	<div style="font-size: 11px; color: #6b6f85; margin-top: 4px; padding-bottom: 4px;">
+		{note} Your employer's paydays may differ.
 	</div>
 </div>

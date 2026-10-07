@@ -1,14 +1,19 @@
-<script lang="ts">
-	import type { ProvinceCode, ProvinceConfig } from '#lib/types.js';
+<script lang="ts" generics="T extends string">
 	import { monoFont } from '#lib/styles.js';
 
-	interface Props {
-		value: ProvinceCode;
-		onChange: (code: ProvinceCode) => void;
-		provinces: Record<string, ProvinceConfig>;
+	interface Option {
+		value: T;
+		label: string;
 	}
 
-	let { value, onChange, provinces }: Props = $props();
+	interface Props {
+		value: T;
+		onChange: (value: T) => void;
+		options: readonly Option[];
+		label: string;
+	}
+
+	let { value, onChange, options, label }: Props = $props();
 
 	let open = $state(false);
 	let ref = $state<HTMLDivElement | null>(null);
@@ -19,11 +24,7 @@
 		}
 	}
 
-	let sortedCodes = $derived(
-		Object.keys(provinces).sort((a, b) =>
-			(provinces[a]?.name ?? a).localeCompare(provinces[b]?.name ?? b)
-		)
-	);
+	let selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? value);
 
 	const buttonStyle = $derived(
 		`background: rgba(255,255,255,0.06); border: 1px solid; border-color: ${open ? 'rgba(102,187,106,0.4)' : 'rgba(255,255,255,0.1)'}; border-radius: 6px; color: #e8e8ef; font-size: 16px; font-weight: 700; padding: 6px 36px 6px 10px; outline: none; width: 100%; ${monoFont} cursor: pointer; text-align: left; position: relative; transition: border-color 0.15s;`
@@ -37,8 +38,15 @@
 <svelte:document onmousedown={handleOutsideClick} />
 
 <div bind:this={ref} style="margin-top: 8px; position: relative;">
-	<button type="button" onclick={() => (open = !open)} style={buttonStyle}>
-		{provinces[value]?.name ?? value}
+	<button
+		type="button"
+		onclick={() => (open = !open)}
+		style={buttonStyle}
+		aria-haspopup="listbox"
+		aria-expanded={open}
+		aria-label="{label}: {selectedLabel}"
+	>
+		{selectedLabel}
 		<svg
 			width="12"
 			height="12"
@@ -59,32 +67,33 @@
 	</button>
 	{#if open}
 		<div
+			role="listbox"
+			aria-label={label}
 			style="position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 50; background: #1e1e36; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.5); max-height: 320px; overflow-y: auto;"
 		>
-			{#each sortedCodes as code (code)}
-				{@const prov = provinces[code]}
-				{@const selected = code === value}
-				{#if prov}
-					<button
-						type="button"
-						onclick={() => {
-							onChange(code as ProvinceCode);
-							open = false;
-						}}
-						style={itemStyle(selected)}
-						onmouseenter={(e) => {
-							if (!selected) e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
-						}}
-						onmouseleave={(e) => {
-							if (!selected) e.currentTarget.style.background = 'transparent';
-						}}
-					>
-						{prov.name}
-						{#if selected}
-							<span style="float: right; font-size: 12px; opacity: 0.7;">✓</span>
-						{/if}
-					</button>
-				{/if}
+			{#each options as option (option.value)}
+				{@const selected = option.value === value}
+				<button
+					type="button"
+					role="option"
+					aria-selected={selected}
+					onclick={() => {
+						onChange(option.value);
+						open = false;
+					}}
+					style={itemStyle(selected)}
+					onmouseenter={(e) => {
+						if (!selected) e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+					}}
+					onmouseleave={(e) => {
+						if (!selected) e.currentTarget.style.background = 'transparent';
+					}}
+				>
+					{option.label}
+					{#if selected}
+						<span style="float: right; font-size: 12px; opacity: 0.7;">✓</span>
+					{/if}
+				</button>
 			{/each}
 		</div>
 	{/if}

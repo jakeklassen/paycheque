@@ -105,12 +105,24 @@ export interface RateConfig {
 	readonly meta: RateMeta;
 }
 
-export interface WeekData {
-	readonly week: number;
+export type PayFrequency = 'weekly' | 'biweekly' | 'semi-monthly' | 'monthly' | 'annually';
+
+export interface PayDate {
+	/** 0–11 */
+	readonly month: number;
+	readonly day: number;
+	/** e.g. "Jun 15" */
+	readonly label: string;
+}
+
+/** One paycheque */
+export interface PeriodData {
+	readonly date: PayDate;
 	readonly gross: number;
 	readonly cpp: number;
 	readonly cpp2: number;
 	readonly ei: number;
+	/** Income tax withheld (federal + provincial + health premium) */
 	readonly tax: number;
 	readonly rrsp: number;
 	readonly net: number;
@@ -118,6 +130,8 @@ export interface WeekData {
 
 export interface MonthData {
 	readonly month: string;
+	/** Number of paycheques dated in this month */
+	readonly cheques: number;
 	readonly net: number;
 	readonly gross: number;
 	readonly cpp: number;
@@ -127,22 +141,41 @@ export interface MonthData {
 	readonly rrsp: number;
 }
 
+/** A paycheque number (1-based) and its date */
+export interface PeriodMarker {
+	readonly period: number;
+	readonly date: PayDate;
+}
+
 export interface SimulationResult {
-	readonly weeks: readonly WeekData[];
+	readonly frequency: PayFrequency;
+	readonly periods: readonly PeriodData[];
 	readonly months: readonly MonthData[];
-	readonly cppMaxedWeek: number | null;
-	readonly cpp2MaxedWeek: number | null;
-	readonly eiMaxedWeek: number | null;
+	readonly cppMaxed: PeriodMarker | null;
+	readonly cpp2Maxed: PeriodMarker | null;
+	readonly eiMaxed: PeriodMarker | null;
 	readonly totalCPP: number;
 	readonly totalCPP2: number;
 	readonly totalEI: number;
+	/** Actual annual tax owed (as on the tax return) */
 	readonly federalTax: number;
 	readonly provincialTax: number;
 	readonly healthPremium: number;
 	readonly totalAnnualTax: number;
+	/** Income tax withheld from paycheques over the year */
+	readonly totalWithheld: number;
+	/** Withheld minus owed: positive is a refund, negative is a balance owing */
+	readonly refund: number;
+	/** Take-home across all paycheques */
+	readonly paychequeNet: number;
+	/** Take-home after filing: paycheques plus refund */
 	readonly totalAnnualNet: number;
 	readonly avgMonthlyNet: number;
+	/** First paycheque's net, as a monthly rate */
 	readonly earlyMonthlyNet: number;
+	/** Last paycheque's net, as a monthly rate */
 	readonly lateMonthlyNet: number;
+	readonly firstChequeNet: number;
+	readonly lastChequeNet: number;
 	readonly annualRRSP: number;
 }

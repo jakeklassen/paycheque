@@ -1,5 +1,6 @@
 import type {
 	HealthPremiumTier,
+	PayFrequency,
 	ProvinceCode,
 	ProvinceConfig,
 	RateConfig,
@@ -11,6 +12,14 @@ import type {
 export const NO_LIMIT = 1e15;
 
 export const YEAR = 2026;
+
+export const PAY_FREQUENCIES: Record<PayFrequency, { label: string; periods: number }> = {
+	weekly: { label: 'Weekly', periods: 52 },
+	biweekly: { label: 'Biweekly', periods: 26 },
+	'semi-monthly': { label: 'Semi-monthly', periods: 24 },
+	monthly: { label: 'Monthly', periods: 12 },
+	annually: { label: 'Annually', periods: 1 }
+};
 
 /** Enhanced ("first additional") CPP rate — deducted from income rather than credited */
 export const CPP_ENHANCED_RATE = 0.01;

@@ -1,36 +1,51 @@
 <script lang="ts">
+	import type { SimulationResult } from '#lib/types.js';
 	import { fmt } from '#lib/format.js';
 	import { cardStyle, labelStyle, monoFont } from '#lib/styles.js';
 
 	interface Props {
-		earlyMonthlyNet: number;
-		avgMonthlyNet: number;
-		lateMonthlyNet: number;
+		data: SimulationResult;
 	}
 
-	let { earlyMonthlyNet, avgMonthlyNet, lateMonthlyNet }: Props = $props();
+	let { data }: Props = $props();
+
+	let perYear = $derived(data.periods.length);
+
+	function chequeNote(net: number): string {
+		return perYear === 1
+			? `One payment of $${fmt(net)}`
+			: `$${fmt(net)} per cheque × ${perYear} a year`;
+	}
+
+	let refundNote = $derived(
+		data.refund >= 0.5
+			? `Plus ~$${fmt(data.refund)} refund when you file`
+			: data.refund <= -0.5
+				? `Less ~$${fmt(-data.refund)} owing when you file`
+				: 'Withholding matches your tax'
+	);
 
 	let stats = $derived([
 		{
 			key: 'early',
-			label: 'Monthly (early year)',
-			sub: 'Jan–Mar with all deductions',
+			label: 'Monthly (before max-out)',
+			sub: chequeNote(data.firstChequeNet),
 			color: '#ff6b6b',
-			value: earlyMonthlyNet
+			value: data.earlyMonthlyNet
 		},
 		{
 			key: 'avg',
 			label: 'Monthly (average)',
-			sub: 'Annualized average',
+			sub: refundNote,
 			color: '#ffa726',
-			value: avgMonthlyNet
+			value: data.avgMonthlyNet
 		},
 		{
 			key: 'late',
 			label: 'Monthly (after max-out)',
-			sub: 'After all caps hit',
+			sub: chequeNote(data.lastChequeNet),
 			color: '#66bb6a',
-			value: lateMonthlyNet
+			value: data.lateMonthlyNet
 		}
 	]);
 </script>
@@ -45,7 +60,7 @@
 			<div style="font-size: 20px; font-weight: 700; {monoFont} color: {s.color};">
 				${fmt(s.value)}
 			</div>
-			<div style="font-size: 11px; color: #50546a; margin-top: 4px;">{s.sub}</div>
+			<div style="font-size: 11px; color: #6b6f85; margin-top: 4px;">{s.sub}</div>
 		</div>
 	{/each}
 </div>

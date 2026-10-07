@@ -1,6 +1,7 @@
 <script lang="ts">
-	import type { ProvinceCode } from '#lib/types.js';
+	import type { PayFrequency, ProvinceCode } from '#lib/types.js';
 	import { simulate } from '#lib/simulation.js';
+	import { scheduleNote } from '#lib/pay-schedule.js';
 	import { monoFont } from '#lib/styles.js';
 	import InputSection from '#lib/components/calculator/InputSection.svelte';
 	import StatCards from '#lib/components/calculator/StatCards.svelte';
@@ -19,6 +20,7 @@
 
 	let salary = $state(untrack(() => data.savedInputs?.salary ?? 217_703));
 	let rrspWeekly = $state(untrack(() => data.savedInputs?.rrsp ?? 0));
+	let frequency = $state<PayFrequency>(untrack(() => data.savedInputs?.frequency ?? 'biweekly'));
 	let province = $state<ProvinceCode>(
 		untrack(() => {
 			const saved = data.savedInputs?.province;
@@ -28,11 +30,13 @@
 
 	$effect(() => {
 		if (!browser) return;
-		const value = encodeURIComponent(JSON.stringify({ salary, rrsp: rrspWeekly, province }));
+		const value = encodeURIComponent(
+			JSON.stringify({ salary, rrsp: rrspWeekly, province, frequency })
+		);
 		document.cookie = `${COOKIE_NAME}=${value};path=/;max-age=${MAX_AGE};samesite=lax`;
 	});
 
-	let sim = $derived(simulate(salary, rrspWeekly, province, config));
+	let sim = $derived(simulate(salary, rrspWeekly, province, config, frequency));
 
 	let currentYear = $derived(data.currentYear);
 </script>
@@ -77,20 +81,22 @@
 			onSalaryChange={(v) => (salary = v)}
 			rrsp={rrspWeekly}
 			onRrspChange={(v) => (rrspWeekly = v)}
+			{frequency}
+			onFrequencyChange={(f) => (frequency = f)}
 			{province}
 			onProvinceChange={(c) => (province = c)}
 			provinces={config.provinces}
 		/>
 
-		<StatCards
-			earlyMonthlyNet={sim.earlyMonthlyNet}
-			avgMonthlyNet={sim.avgMonthlyNet}
-			lateMonthlyNet={sim.lateMonthlyNet}
-		/>
+		<StatCards data={sim} />
 
 		<DeductionMilestones data={sim} {config} />
 
-		<MonthlyChart months={sim.months} avgMonthlyNet={sim.avgMonthlyNet} />
+		<MonthlyChart
+			months={sim.months}
+			avgMonthlyNet={sim.avgMonthlyNet}
+			note={scheduleNote(frequency, sim.periods[0].date)}
+		/>
 
 		<AnnualBreakdown {salary} {province} data={sim} {config} />
 

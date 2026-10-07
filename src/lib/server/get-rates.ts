@@ -1,5 +1,5 @@
-import type { ProvinceCode, RateConfig } from '#lib/types.js';
-import { FALLBACK_CONFIG } from '#lib/constants.js';
+import type { PayFrequency, ProvinceCode, RateConfig } from '#lib/types.js';
+import { FALLBACK_CONFIG, PAY_FREQUENCIES } from '#lib/constants.js';
 import { readCache, writeCache } from './cache';
 import { applyHandMaintainedRates, scrapeAllRates } from './scraper';
 
@@ -7,6 +7,7 @@ export interface SavedInputs {
 	salary: number;
 	rrsp: number;
 	province: ProvinceCode;
+	frequency: PayFrequency;
 }
 
 export interface LoaderData {
@@ -28,7 +29,11 @@ function parseSavedInputs(raw: string | undefined): SavedInputs | null {
 		return {
 			salary: parsed.salary,
 			rrsp: parsed.rrsp,
-			province: typeof parsed.province === 'string' ? (parsed.province as ProvinceCode) : 'ON'
+			province: typeof parsed.province === 'string' ? (parsed.province as ProvinceCode) : 'ON',
+			frequency:
+				typeof parsed.frequency === 'string' && parsed.frequency in PAY_FREQUENCIES
+					? parsed.frequency
+					: 'biweekly'
 		};
 	} catch {
 		return null;

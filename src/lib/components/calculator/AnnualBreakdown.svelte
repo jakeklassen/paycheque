@@ -72,4 +72,19 @@
 			${fmt(data.totalAnnualNet)}
 		</span>
 	</div>
+	<div style="margin-top: 10px; font-size: 12px; color: #8b8fa3; line-height: 1.8;">
+		<div style="display: flex; justify-content: space-between;">
+			<span>Take-home in paycheques</span>
+			<span style={monoFont}>${fmt(data.paychequeNet)}</span>
+		</div>
+		<div style="display: flex; justify-content: space-between;">
+			<span>
+				{data.refund >= 0 ? 'Refund when you file' : 'Owing when you file'}
+				<span style="color: #6b6f85;">
+					(withheld ${fmt(data.totalWithheld)} vs. owed ${fmt(data.totalAnnualTax)})
+				</span>
+			</span>
+			<span style={monoFont}>{data.refund >= 0 ? '+' : '−'}${fmt(Math.abs(data.refund))}</span>
+		</div>
+	</div>
 </div>

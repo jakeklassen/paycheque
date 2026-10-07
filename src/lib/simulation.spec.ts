@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { RateConfig } from './types';
-import { FALLBACK_CONFIG, NO_LIMIT, PROVINCE_EXTRAS } from './constants';
+import type { PayFrequency, RateConfig } from './types';
+import { FALLBACK_CONFIG, NO_LIMIT, PAY_FREQUENCIES, PROVINCE_EXTRAS } from './constants';
 import { applyHandMaintainedRates } from './server/scraper';
 import { simulate } from './simulation';
 
@@ -34,7 +34,7 @@ const CONFIG: RateConfig = applyHandMaintainedRates({
 });
 
 describe('simulate', () => {
-	const result = simulate(170_000, 0, 'ON', CONFIG);
+	const result = simulate(170_000, 0, 'ON', CONFIG, 'semi-monthly');
 
 	it('applies CPP/EI deductions and credits to income tax', () => {
 		expect(result.federalTax).toBeCloseTo(30_502.14, 2);
@@ -43,10 +43,42 @@ describe('simulate', () => {
 		expect(result.totalAnnualNet).toBeCloseTo(115_343.56, 2);
 	});
 
-	it('monthly nets sum to the annual net', () => {
-		const monthlySum = result.months.reduce((s, m) => s + m.net, 0);
-		expect(monthlySum).toBeCloseTo(result.totalAnnualNet, 0);
-		expect(result.lateMonthlyNet).toBeCloseTo((170_000 - result.totalAnnualTax) / 12, 0);
+	it('annual net is the same for every pay frequency', () => {
+		for (const frequency of Object.keys(PAY_FREQUENCIES) as PayFrequency[]) {
+			const r = simulate(170_000, 0, 'ON', CONFIG, frequency);
+			expect(r.totalAnnualNet).toBeCloseTo(115_343.56, 2);
+			expect(r.months.reduce((s, m) => s + m.net, 0)).toBeCloseTo(r.paychequeNet, 1);
+		}
+	});
+});
+
+// Per-cheque withholding computed independently from the T4127 Option 1 formulas
+describe('paycheques', () => {
+	it.each([
+		// frequency, first cheque net, last cheque net, take-home in cheques, refund
+		['semi-monthly', 4_528.22, 4_982.94, 114_769.83, 573.73],
+		['biweekly', 4_179.89, 4_599.64, 114_764.76, 578.8]
+	] as const)('%s at $170,000 in Ontario', (frequency, first, last, paycheques, refund) => {
+		const r = simulate(170_000, 0, 'ON', CONFIG, frequency);
+		expect(r.firstChequeNet).toBeCloseTo(first, 2);
+		expect(r.lastChequeNet).toBeCloseTo(last, 2);
+		expect(r.paychequeNet).toBeCloseTo(paycheques, 2);
+		expect(r.refund).toBeCloseTo(refund, 2);
+		expect(r.totalCPP).toBeCloseTo(4_230.45, 2);
+		expect(r.totalCPP2).toBeCloseTo(416, 2);
+		expect(r.totalEI).toBeCloseTo(1_123.07, 2);
+	});
+
+	it('maxes out on the expected twice-a-month cheques', () => {
+		const r = simulate(170_000, 0, 'ON', CONFIG, 'semi-monthly');
+		expect(r.eiMaxed).toMatchObject({ period: 10, date: { label: 'May 31' } });
+		expect(r.cppMaxed).toMatchObject({ period: 11, date: { label: 'Jun 15' } });
+		expect(r.cpp2Maxed).toMatchObject({ period: 12, date: { label: 'Jun 30' } });
+	});
+
+	it('puts a third biweekly cheque in two months', () => {
+		const r = simulate(170_000, 0, 'ON', CONFIG, 'biweekly');
+		expect(r.months.filter((m) => m.cheques === 3).map((m) => m.month)).toEqual(['Jan', 'Jul']);
 	});
 });
 
@@ -65,7 +97,7 @@ describe('provincial rules', () => {
 		// so this is not a complete Quebec estimate
 		['QC', 170_000, 25_495.86, 30_365.98]
 	] as const)('%s at $%i', (province, salary, federal, provincial) => {
-		const r = simulate(salary, 0, province, CONFIG);
+		const r = simulate(salary, 0, province, CONFIG, 'semi-monthly');
 		expect(r.federalTax).toBeCloseTo(federal, 2);
 		expect(r.provincialTax).toBeCloseTo(provincial, 2);
 	});
@@ -73,7 +105,10 @@ describe('provincial rules', () => {
 	it('fills every province when only fallback data is available', () => {
 		const fallback = applyHandMaintainedRates(FALLBACK_CONFIG);
 		expect(Object.keys(fallback.provinces).sort()).toEqual(Object.keys(PROVINCE_EXTRAS).sort());
-		expect(simulate(170_000, 0, 'BC', fallback).provincialTax).toBeCloseTo(14_491.78, 2);
+		expect(simulate(170_000, 0, 'BC', fallback, 'semi-monthly').provincialTax).toBeCloseTo(
+			14_491.78,
+			2
+		);
 	});
 
 	it('replaces outdated cached personal amounts and surtaxes', () => {

@@ -1,40 +1,62 @@
-import type { MonthData, RateConfig, SimulationResult, TaxCredits, WeekData } from './types';
-import { CPP_ENHANCED_RATE } from './constants';
+import type {
+	MonthData,
+	PayFrequency,
+	PeriodData,
+	PeriodMarker,
+	RateConfig,
+	SimulationResult,
+	TaxCredits
+} from './types';
+import { CPP_ENHANCED_RATE, PAY_FREQUENCIES } from './constants';
+import { MONTH_NAMES, payDates } from './pay-schedule';
 import { calcFederalTax, calcHealthPremium, calcProvincialTax } from './tax';
-
-const MONTH_NAMES = [
-	'Jan',
-	'Feb',
-	'Mar',
-	'Apr',
-	'May',
-	'Jun',
-	'Jul',
-	'Aug',
-	'Sep',
-	'Oct',
-	'Nov',
-	'Dec'
-] as const;
 
 function round2(v: number): number {
 	return Math.round(v * 100) / 100;
 }
 
+/** Income tax on an annual (or annualized) basis: federal, provincial, health premium */
+function annualTax(
+	taxableIncome: number,
+	credits: TaxCredits,
+	province: string,
+	config: RateConfig
+) {
+	return {
+		federal: calcFederalTax(taxableIncome, province, credits, config),
+		provincial: calcProvincialTax(taxableIncome, province, credits, config),
+		healthPremium: calcHealthPremium(taxableIncome, province, config)
+	};
+}
+
+/**
+ * Simulate a year of paycheques following CRA's T4127 payroll formulas
+ * (Option 1): CPP's basic exemption is spread across pay periods, CPP2 starts
+ * once earnings pass the YMPE, and each cheque's income tax is the annualized
+ * tax on that cheque — including credits for the CPP and EI deducted on it, so
+ * withholding rises once they max out. The annual tax actually owed is
+ * computed separately; the difference is the refund at filing time.
+ */
 export function simulate(
 	annualGross: number,
 	rrspWeekly: number,
 	province: string,
-	config: RateConfig
+	config: RateConfig,
+	frequency: PayFrequency
 ): SimulationResult {
-	const weeklyGross = annualGross / 52;
+	const P = PAY_FREQUENCIES[frequency].periods;
+	const dates = payDates(config.year, frequency);
+	const gross = annualGross / P;
 	const annualRRSP = rrspWeekly * 52;
+	const rrsp = annualRRSP / P;
 
 	// Quebec uses different EI rates
 	const ei = province === 'QC' ? config.eiQuebec : config.ei;
 	const { cpp, cpp2 } = config;
+	const enhancedShare = CPP_ENHANCED_RATE / cpp.rate;
+	const cppBaseMax = cpp.maxEmployee * (1 - enhancedShare);
 
-	// Full-year contributions drive the tax deductions and credits
+	// Full-year contributions drive the tax actually owed
 	const annualCPP = Math.min(
 		Math.max(0, Math.min(annualGross, cpp.ympe) - cpp.exemption) * cpp.rate,
 		cpp.maxEmployee
@@ -44,139 +66,125 @@ export function simulate(
 		cpp2.maxEmployee
 	);
 	const annualEI = Math.min(Math.min(annualGross, ei.mie) * ei.rate, ei.maxEmployee);
-	const cppEnhanced = annualCPP * (CPP_ENHANCED_RATE / cpp.rate);
 
 	// Enhanced CPP and all of CPP2 are deductions; base CPP and EI are credits
-	const taxableIncome = Math.max(0, annualGross - annualRRSP - cppEnhanced - annualCPP2);
-	const credits: TaxCredits = {
-		cppBase: annualCPP - cppEnhanced,
-		ei: annualEI,
-		employmentIncome: annualGross
-	};
+	const owed = annualTax(
+		Math.max(0, annualGross - annualRRSP - annualCPP * enhancedShare - annualCPP2),
+		{ cppBase: annualCPP * (1 - enhancedShare), ei: annualEI, employmentIncome: annualGross },
+		province,
+		config
+	);
+	const totalAnnualTax = owed.federal + owed.provincial + owed.healthPremium;
 
-	const federalTax = calcFederalTax(taxableIncome, province, credits, config);
-	const provincialTax = calcProvincialTax(taxableIncome, province, credits, config);
-	const healthPremium = calcHealthPremium(taxableIncome, province, config);
-	const totalAnnualTax = federalTax + provincialTax + healthPremium;
-	const weeklyTax = totalAnnualTax / 52;
-
-	// Week-by-week CPP/CPP2/EI simulation
-	const weeks: WeekData[] = [];
+	const periods: PeriodData[] = [];
 	let cumGross = 0;
 	let cumCPP = 0;
 	let cumCPP2 = 0;
 	let cumEI = 0;
-	let cppMaxedWeek: number | null = null;
-	let cpp2MaxedWeek: number | null = null;
-	let eiMaxedWeek: number | null = null;
+	let cppMaxed: PeriodMarker | null = null;
+	let cpp2Maxed: PeriodMarker | null = null;
+	let eiMaxed: PeriodMarker | null = null;
 
-	for (let w = 1; w <= 52; w++) {
-		cumGross += weeklyGross;
+	for (let i = 0; i < P; i++) {
+		const date = dates[i];
 
-		let cppW = 0;
-		if (cumCPP < cpp.maxEmployee) {
-			const pensionable = Math.min(cumGross, cpp.ympe) - cpp.exemption;
-			const owed = Math.min(Math.max(0, pensionable) * cpp.rate, cpp.maxEmployee);
-			cppW = Math.max(0, owed - cumCPP);
-			cumCPP += cppW;
-			if (cumCPP >= cpp.maxEmployee && cppMaxedWeek === null) cppMaxedWeek = w;
+		const cppP = Math.min(
+			round2(cpp.rate * Math.max(0, gross - cpp.exemption / P)),
+			round2(cpp.maxEmployee - cumCPP)
+		);
+		const above = Math.max(
+			0,
+			Math.min(cumGross + gross, cpp2.yampe) - Math.max(cpp2.floor, cumGross)
+		);
+		const cpp2P = Math.min(round2(above * cpp2.rate), round2(cpp2.maxEmployee - cumCPP2));
+		const eiP = Math.min(round2(gross * ei.rate), round2(ei.maxEmployee - cumEI));
+
+		cumGross += gross;
+		cumCPP += cppP;
+		cumCPP2 += cpp2P;
+		cumEI += eiP;
+		if (cppMaxed === null && cppP > 0 && cpp.maxEmployee - cumCPP < 0.005) {
+			cppMaxed = { period: i + 1, date };
+		}
+		if (cpp2Maxed === null && cpp2P > 0 && cpp2.maxEmployee - cumCPP2 < 0.005) {
+			cpp2Maxed = { period: i + 1, date };
+		}
+		if (eiMaxed === null && eiP > 0 && ei.maxEmployee - cumEI < 0.005) {
+			eiMaxed = { period: i + 1, date };
 		}
 
-		let cpp2W = 0;
-		if (cumCPP2 < cpp2.maxEmployee) {
-			const above = Math.max(0, Math.min(cumGross, cpp2.yampe) - cpp2.floor);
-			const owed = Math.min(above * cpp2.rate, cpp2.maxEmployee);
-			cpp2W = Math.max(0, owed - cumCPP2);
-			cumCPP2 += cpp2W;
-			if (cumCPP2 >= cpp2.maxEmployee && cpp2MaxedWeek === null) cpp2MaxedWeek = w;
-		}
+		// Withholding: annualize this cheque (T4127 factor A) with credits for
+		// the contributions deducted on it, capped at the annual maximums
+		const perCheque = annualTax(
+			Math.max(0, P * (gross - rrsp - cppP * enhancedShare - cpp2P)),
+			{
+				cppBase: Math.min(P * cppP * (1 - enhancedShare), cppBaseMax),
+				ei: Math.min(P * eiP, ei.maxEmployee),
+				employmentIncome: P * gross
+			},
+			province,
+			config
+		);
+		const tax = round2((perCheque.federal + perCheque.provincial + perCheque.healthPremium) / P);
 
-		let eiW = 0;
-		if (cumEI < ei.maxEmployee) {
-			const insurable = Math.min(cumGross, ei.mie);
-			const owed = Math.min(insurable * ei.rate, ei.maxEmployee);
-			eiW = Math.max(0, owed - cumEI);
-			cumEI += eiW;
-			if (cumEI >= ei.maxEmployee && eiMaxedWeek === null) eiMaxedWeek = w;
-		}
-
-		weeks.push({
-			week: w,
-			gross: weeklyGross,
-			cpp: cppW,
-			cpp2: cpp2W,
-			ei: eiW,
-			tax: weeklyTax,
-			rrsp: rrspWeekly,
-			net: weeklyGross - cppW - cpp2W - eiW - weeklyTax - rrspWeekly
+		periods.push({
+			date,
+			gross,
+			cpp: cppP,
+			cpp2: cpp2P,
+			ei: eiP,
+			tax,
+			rrsp,
+			net: gross - cppP - cpp2P - eiP - tax - rrsp
 		});
 	}
 
-	// Aggregate to months using uniform month length. 52 weeks span 364 days,
-	// so months must split 364 days for monthly nets to sum to the annual net.
-	const uniformDays = (52 * 7) / 12;
-	const months: MonthData[] = [];
+	const months: MonthData[] = MONTH_NAMES.map((month, m) => {
+		const inMonth = periods.filter((p) => p.date.month === m);
+		const sum = (key: Exclude<keyof PeriodData, 'date'>) =>
+			round2(inMonth.reduce((s, p) => s + p[key], 0));
+		return {
+			month,
+			cheques: inMonth.length,
+			net: sum('net'),
+			gross: sum('gross'),
+			cpp: sum('cpp'),
+			cpp2: sum('cpp2'),
+			ei: sum('ei'),
+			tax: sum('tax'),
+			rrsp: sum('rrsp')
+		};
+	});
 
-	for (let m = 0; m < 12; m++) {
-		const monthStartDay = m * uniformDays;
-		const monthEndDay = (m + 1) * uniformDays;
-		let mNet = 0;
-		let mGross = 0;
-		let mCPP = 0;
-		let mCPP2 = 0;
-		let mEI = 0;
-		let mTax = 0;
-		let mRRSP = 0;
-
-		for (let day = Math.floor(monthStartDay); day < Math.ceil(monthEndDay); day++) {
-			const dayStart = Math.max(day, monthStartDay);
-			const dayEnd = Math.min(day + 1, monthEndDay);
-			const fraction = (dayEnd - dayStart) / 7;
-
-			const weekIdx = Math.min(Math.floor(day / 7), 51);
-			const wk = weeks[weekIdx];
-			mNet += wk.net * fraction;
-			mGross += wk.gross * fraction;
-			mCPP += wk.cpp * fraction;
-			mCPP2 += wk.cpp2 * fraction;
-			mEI += wk.ei * fraction;
-			mTax += wk.tax * fraction;
-			mRRSP += wk.rrsp * fraction;
-		}
-
-		months.push({
-			month: MONTH_NAMES[m],
-			net: round2(mNet),
-			gross: round2(mGross),
-			cpp: round2(mCPP),
-			cpp2: round2(mCPP2),
-			ei: round2(mEI),
-			tax: round2(mTax),
-			rrsp: round2(mRRSP)
-		});
-	}
-
-	const totalAnnualNet = weeks.reduce((s, w) => s + w.net, 0);
-	const earlyMonthly = (months[0].net + months[1].net + months[2].net) / 3;
-	const lateMonthly = (months[9].net + months[10].net + months[11].net) / 3;
+	const totalWithheld = periods.reduce((s, p) => s + p.tax, 0);
+	const paychequeNet = periods.reduce((s, p) => s + p.net, 0);
+	const refund = totalWithheld - totalAnnualTax;
+	const firstChequeNet = periods[0].net;
+	const lastChequeNet = periods[P - 1].net;
 
 	return {
-		weeks,
+		frequency,
+		periods,
 		months,
-		cppMaxedWeek,
-		cpp2MaxedWeek,
-		eiMaxedWeek,
+		cppMaxed,
+		cpp2Maxed,
+		eiMaxed,
 		totalCPP: cumCPP,
 		totalCPP2: cumCPP2,
 		totalEI: cumEI,
-		federalTax,
-		provincialTax,
-		healthPremium,
+		federalTax: owed.federal,
+		provincialTax: owed.provincial,
+		healthPremium: owed.healthPremium,
 		totalAnnualTax,
-		totalAnnualNet,
-		avgMonthlyNet: totalAnnualNet / 12,
-		earlyMonthlyNet: earlyMonthly,
-		lateMonthlyNet: lateMonthly,
+		totalWithheld,
+		refund,
+		paychequeNet,
+		totalAnnualNet: paychequeNet + refund,
+		avgMonthlyNet: paychequeNet / 12,
+		earlyMonthlyNet: (firstChequeNet * P) / 12,
+		lateMonthlyNet: (lastChequeNet * P) / 12,
+		firstChequeNet,
+		lastChequeNet,
 		annualRRSP
 	};
 }

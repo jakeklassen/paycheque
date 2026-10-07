@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { RateConfig, SimulationResult } from '#lib/types.js';
-	import { fmt, weekToDate } from '#lib/format.js';
+	import type { PeriodMarker, RateConfig, SimulationResult } from '#lib/types.js';
+	import { fmt } from '#lib/format.js';
 	import { cardStyle, monoFont } from '#lib/styles.js';
 
 	interface Props {
@@ -16,28 +16,36 @@
 			{
 				label: 'EI',
 				max: ei.maxEmployee,
-				week: data.eiMaxedWeek,
+				maxed: data.eiMaxed,
 				color: '#42a5f5',
 				detail: `${(ei.rate * 100).toFixed(2)}% on earnings up to $${ei.mie.toLocaleString()}`
 			},
 			{
 				label: 'CPP',
 				max: cpp.maxEmployee,
-				week: data.cppMaxedWeek,
+				maxed: data.cppMaxed,
 				color: '#ffa726',
 				detail: `${(cpp.rate * 100).toFixed(2)}% on $${cpp.exemption.toLocaleString()} – $${cpp.ympe.toLocaleString()}`
 			},
 			{
 				label: 'CPP2',
 				max: cpp2.maxEmployee,
-				week: data.cpp2MaxedWeek,
+				maxed: data.cpp2Maxed,
 				color: '#ffcc80',
 				detail: `${(cpp2.rate * 100).toFixed(1)}% on $${cpp2.floor.toLocaleString()} – $${cpp2.yampe.toLocaleString()}`
 			}
 		];
 	});
 
-	let lastMaxWeek = $derived(data.cpp2MaxedWeek ?? data.cppMaxedWeek ?? data.eiMaxedWeek);
+	let lastMaxed = $derived(
+		[data.eiMaxed, data.cppMaxed, data.cpp2Maxed]
+			.filter((m): m is PeriodMarker => m !== null)
+			.reduce<PeriodMarker | null>((a, b) => (a && a.period >= b.period ? a : b), null)
+	);
+
+	function describe(m: PeriodMarker | null): string {
+		return m ? `${m.date.label} cheque (${m.period} of ${data.periods.length})` : 'not reached';
+	}
 </script>
 
 <div style="{cardStyle} padding: 20px 24px; margin-bottom: 24px;">
@@ -55,10 +63,8 @@
 				</span>
 				<div>
 					<div style="font-size: 13px; color: #c0c0d0;">
-						Max <strong>${fmt(item.max)}</strong> — paid off by
-						<strong style="color: {item.color};">
-							{item.week != null ? `~${weekToDate(item.week)} (wk ${item.week})` : 'N/A'}
-						</strong>
+						Max <strong>${fmt(item.max)}</strong> — reached on the
+						<strong style="color: {item.color};">{describe(item.maxed)}</strong>
 					</div>
 					<div style="font-size: 11px; color: #50546a; margin-top: 2px;">{item.detail}</div>
 				</div>
@@ -78,12 +84,14 @@
 		<strong style="color: #66bb6a;">
 			${fmt(data.totalCPP + data.totalCPP2 + data.totalEI)}
 		</strong>
-		— All maxed by
-		<strong style="color: #66bb6a;">
-			~{lastMaxWeek != null ? weekToDate(lastMaxWeek) : 'N/A'}
-		</strong>, then monthly net jumps by
-		<strong style="color: #66bb6a;">
-			~${fmt(data.lateMonthlyNet - data.earlyMonthlyNet)}/mo
-		</strong>
+		{#if lastMaxed}
+			— all maxed by the
+			<strong style="color: #66bb6a;">{lastMaxed.date.label}</strong> cheque, then take-home rises
+			by
+			<strong style="color: #66bb6a;">
+				~${fmt(data.lateMonthlyNet - data.earlyMonthlyNet)}/mo
+			</strong>
+			(income tax withheld goes up a little once CPP and EI stop)
+		{/if}
 	</div>
 </div>
