@@ -25,10 +25,10 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: jdx/mise-action@v3
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
       - run: pnpm install --frozen-lockfile
 
       - id: rates
@@ -70,7 +70,7 @@ jobs:
 
       - name: Open or update the pull request
         if: steps.diff.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           branch: rates/t4127-update
           add-paths: src/lib/rates.json
