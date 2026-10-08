@@ -7,7 +7,7 @@ import type {
 	SimulationResult,
 	TaxCredits
 } from './types';
-import { CPP_ENHANCED_RATE, PAY_FREQUENCIES } from './constants';
+import { PAY_FREQUENCIES } from './constants';
 import { MONTH_NAMES, payDates } from './pay-schedule';
 import { calcFederalTax, calcHealthPremium, calcProvincialTax } from './tax';
 
@@ -65,7 +65,7 @@ export function simulate(
 	// Quebec uses different EI rates
 	const ei = province === 'QC' ? config.eiQuebec : config.ei;
 	const { cpp, cpp2 } = config;
-	const enhancedShare = CPP_ENHANCED_RATE / cpp.rate;
+	const enhancedShare = cpp.enhancedRate / cpp.rate;
 	const cppBaseMax = cpp.maxEmployee * (1 - enhancedShare);
 	const exemption = truncate2(cpp.exemption / P);
 

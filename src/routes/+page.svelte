@@ -1,7 +1,9 @@
 <script lang="ts">
 	import type { PayFrequency, ProvinceCode } from '#lib/types.js';
+	import { RATES } from '#lib/constants.js';
 	import { simulate } from '#lib/simulation.js';
 	import { scheduleNote } from '#lib/pay-schedule.js';
+	import { DEFAULT_INPUTS, loadInputs, saveInputs } from '#lib/saved-inputs.js';
 	import { monoFont } from '#lib/styles.js';
 	import InputSection from '#lib/components/calculator/InputSection.svelte';
 	import StatCards from '#lib/components/calculator/StatCards.svelte';
@@ -9,36 +11,37 @@
 	import MonthlyChart from '#lib/components/calculator/MonthlyChart.svelte';
 	import AnnualBreakdown from '#lib/components/calculator/AnnualBreakdown.svelte';
 	import Sources from '#lib/components/calculator/Sources.svelte';
-	import { browser } from '$app/env';
-	import { untrack } from 'svelte';
+	import { onMount } from 'svelte';
 
-	const COOKIE_NAME = 'calc-inputs';
-	const MAX_AGE = 60 * 60 * 24 * 365; // 1 year
+	const config = RATES;
 
-	let { data } = $props();
-	let config = $derived(data.config);
+	// The page is prerendered with the defaults; saved inputs load once it's running in the browser
+	let salary = $state(DEFAULT_INPUTS.salary);
+	let rrspWeekly = $state(DEFAULT_INPUTS.rrsp);
+	let frequency = $state<PayFrequency>(DEFAULT_INPUTS.frequency);
+	let province = $state<ProvinceCode>(DEFAULT_INPUTS.province);
+	let loaded = $state(false);
 
-	let salary = $state(untrack(() => data.savedInputs?.salary ?? 217_703));
-	let rrspWeekly = $state(untrack(() => data.savedInputs?.rrsp ?? 0));
-	let frequency = $state<PayFrequency>(untrack(() => data.savedInputs?.frequency ?? 'biweekly'));
-	let province = $state<ProvinceCode>(
-		untrack(() => {
-			const saved = data.savedInputs?.province;
-			return saved && data.config.provinces[saved] ? saved : 'ON';
-		})
-	);
+	/** Tax years roll over on Jan 1 in Canada; prerendering can't know the visitor's year */
+	let currentYear = $state(config.year);
+
+	onMount(() => {
+		const saved = loadInputs();
+		salary = saved.salary;
+		rrspWeekly = saved.rrsp;
+		frequency = saved.frequency;
+		province = saved.province;
+		loaded = true;
+		const year = new Intl.DateTimeFormat('en-CA', { year: 'numeric', timeZone: 'America/Toronto' });
+		currentYear = Number(year.format(new Date()));
+	});
 
 	$effect(() => {
-		if (!browser) return;
-		const value = encodeURIComponent(
-			JSON.stringify({ salary, rrsp: rrspWeekly, province, frequency })
-		);
-		document.cookie = `${COOKIE_NAME}=${value};path=/;max-age=${MAX_AGE};samesite=lax`;
+		const inputs = { salary, rrsp: rrspWeekly, province, frequency };
+		if (loaded) saveInputs(inputs);
 	});
 
 	let sim = $derived(simulate(salary, rrspWeekly, province, config, frequency));
-
-	let currentYear = $derived(data.currentYear);
 </script>
 
 <div

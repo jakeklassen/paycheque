@@ -1,39 +1,37 @@
 /**
- * Check the hand-maintained rates in src/lib/constants.ts, and the brackets the
- * scraper pulls from CRA's public tax-rates page, against CRA's T4127 Payroll
- * Deductions Formulas. CRA publishes a January and a July edition each year;
- * run this after each one comes out:
+ * Check src/lib/rates.json against CRA's T4127 Payroll Deductions Formulas.
+ * CRA publishes a January and a July edition each year:
  *
- *   pnpm check:rates
+ *   pnpm check:rates                      report differences
+ *   pnpm check:rates --write              also update rates.json where it can
+ *   pnpm check:rates --report report.md   also write a markdown summary
  *
- * Exits with code 1 when anything needs updating or could not be verified.
+ * --write only takes values from a January edition. July editions show
+ * prorated July–December payroll values rather than annual ones, so their
+ * differences are left for a person to resolve.
+ *
+ * Exit codes: 0 nothing left to do (after any --write), 1 something needs a
+ * person, 2 CRA could not be reached.
  */
+import { readFileSync, writeFileSync } from 'node:fs';
+import { get as httpsGet } from 'node:https';
+import { parseArgs } from 'node:util';
 import { load, type CheerioAPI } from 'cheerio';
-import {
-	CANADA_EMPLOYMENT_AMOUNT,
-	CPP_ENHANCED_RATE,
-	FALLBACK_CONFIG,
-	FALLBACK_PROVINCE_BRACKETS,
-	NO_LIMIT,
-	PROVINCE_BRACKET_OVERRIDES,
-	PROVINCE_EXTRAS,
-	QUEBEC_ABATEMENT,
-	YEAR
-} from '../src/lib/constants.ts';
-import { calcHealthPremium } from '../src/lib/tax.ts';
-import { fetchTaxBrackets } from '../src/lib/server/scraper/tax-brackets.ts';
-import { fetchWithTimeout } from '../src/lib/server/scraper/parse-utils.ts';
-import type { ProvinceCode, RateConfig, TaxBracket } from '../src/lib/types.ts';
+import { format, resolveConfig } from 'prettier';
+import { NO_LIMIT, PROVINCE_NAMES } from '../src/lib/constants.ts';
+import type { BracketRow, ProvinceCode, RatesData } from '../src/lib/types.ts';
 
 const T4127 =
 	'https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas';
 const JAN_URL = `${T4127}/t4127-jan/t4127-jan-payroll-deductions-formulas-computer-programs.html`;
 const JUL_URL = `${T4127}/t4127-jul/t4127-jul-payroll-deductions-formulas.html`;
+const QUEBEC_URL = (year: number) =>
+	`https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/parametres/AUTEN_IncomeTax${year}.pdf`;
 
 /**
  * The July edition's tables hold prorated July–December payroll values that
  * catch up for January–June. The app uses annual values, so a difference is
- * expected only when CRA shows exactly `cra` AND the code holds exactly
+ * expected only when CRA shows exactly `cra` AND rates.json holds exactly
  * `annual` (from the edition's "What's new" text). Keyed by
  * "<year>-<month> <check>".
  */
@@ -44,11 +42,51 @@ const PRORATED_EXCEPTIONS: Record<string, { cra: number; annual: number }> = {
 	'2026-07 PE bracket 6 rate': { cra: 0.21, annual: 0.2 }
 };
 
-const PROVINCES = (Object.keys(PROVINCE_EXTRAS) as ProvinceCode[]).filter((c) => c !== 'QC');
+const PROVINCES = (Object.keys(PROVINCE_NAMES) as ProvinceCode[]).filter((c) => c !== 'QC');
+
+const RATES_FILE = new URL('../src/lib/rates.json', import.meta.url);
+const current = JSON.parse(readFileSync(RATES_FILE, 'utf8')) as RatesData;
+
+type Mutable<T> = { -readonly [K in keyof T]: Mutable<T[K]> };
+/** What rates.json becomes with --write */
+const proposed = structuredClone(current) as Mutable<RatesData>;
+
+const args = parseArgs({
+	options: { write: { type: 'boolean', default: false }, report: { type: 'string' } }
+}).values;
 
 // ---------------------------------------------------------------------------
 // Fetching and parsing
 // ---------------------------------------------------------------------------
+
+const USER_AGENT =
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const FETCH_TIMEOUT_MS = 20_000;
+
+/** CRA couldn't be reached, as opposed to a page that changed shape */
+class NetworkError extends Error {}
+
+/**
+ * Fetch with node:https rather than fetch: Canada.ca's Akamai CDN blocks
+ * undici's TLS fingerprint.
+ */
+function fetchPage(url: string): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const req = httpsGet(url, { headers: { 'User-Agent': USER_AGENT } }, (res) => {
+			let data = '';
+			res.on('data', (chunk: string) => (data += chunk));
+			res.on('end', () =>
+				res.statusCode === 200
+					? resolve(data)
+					: reject(new NetworkError(`HTTP ${res.statusCode ?? 0}`))
+			);
+		});
+		req.on('error', (err) => reject(new NetworkError(err.message)));
+		req.setTimeout(FETCH_TIMEOUT_MS, () => {
+			req.destroy(new Error(`timed out after ${FETCH_TIMEOUT_MS}ms`));
+		});
+	});
+}
 
 interface Edition {
 	url: string;
@@ -77,9 +115,7 @@ const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
 const num = (s: string | undefined) => (s ? parseFloat(s.replace(/[$,*\s]/g, '')) : NaN);
 
 async function fetchEdition(url: string): Promise<Edition> {
-	const res = await fetchWithTimeout(url);
-	if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-	const $ = load(res.body);
+	const $ = load(await fetchPage(url));
 	const title = clean($('h1').first().text());
 	const m = title.match(/Effective (January|July) 1, (\d{4})/);
 	if (!m) throw new Error(`unrecognised page title "${title}"`);
@@ -280,14 +316,15 @@ function parseHealthPremium(text: string): PremiumTier[] {
 	}));
 }
 
-function evalPremium(tiers: PremiumTier[], income: number): number {
-	const tier = tiers.findLast((t) => income > t.start);
-	return tier ? Math.min(tier.cap, tier.base + tier.rate * (income - tier.start)) : 0;
-}
-
 // ---------------------------------------------------------------------------
 // Comparison and reporting
 // ---------------------------------------------------------------------------
+
+/** A change to rates.json that resolves a finding; one fix can resolve several */
+interface Fix {
+	key: string;
+	apply: () => void;
+}
 
 interface Finding {
 	section: string;
@@ -295,6 +332,7 @@ interface Finding {
 	code: string;
 	cra: string;
 	note?: string;
+	fix?: Fix;
 }
 
 const passed = new Map<string, number>();
@@ -302,6 +340,8 @@ const mismatches: Finding[] = [];
 const expected: Finding[] = [];
 const unverified: string[] = [];
 const notes: string[] = [];
+/** Problems that need a person even after --write */
+const manual: string[] = [];
 let editionKey = '';
 
 const money = (n: number) =>
@@ -309,78 +349,89 @@ const money = (n: number) =>
 const pct = (r: number) => `${+(r * 100).toFixed(4)}%`;
 const same = (a: number, b: number) => Math.abs(a - b) < 1e-6;
 const pass = (section: string) => passed.set(section, (passed.get(section) ?? 0) + 1);
+const allFinite = (...values: number[]) => values.every(Number.isFinite);
 
 function compare(
 	section: string,
 	item: string,
 	code: number | undefined,
 	cra: number,
-	fmt: (n: number) => string = money
+	fmt: (n: number) => string = money,
+	fix?: Fix | ((value: number) => void)
 ) {
-	const codeText = code === undefined ? 'not in code' : fmt(code);
+	const codeText = code === undefined ? 'not in rates.json' : fmt(code);
 	if (Number.isNaN(cra)) {
 		mismatches.push({
 			section,
 			item,
 			code: codeText,
-			cra: 'not found (has the CRA page changed?)'
+			// A group fix (CRA's whole bracket set, say) also removes entries CRA no longer has
+			...(typeof fix === 'object'
+				? { cra: 'none', fix }
+				: { cra: 'not found (has the CRA page changed?)' })
 		});
 		return;
 	}
 	const finding = { section, item, code: codeText, cra: fmt(cra) };
 	const exception = PRORATED_EXCEPTIONS[`${editionKey} ${item}`];
 	if (exception && same(exception.cra, cra)) {
-		// CRA shows the prorated payroll value; the code must hold the annual one
+		// CRA shows the prorated payroll value; rates.json must hold the annual one
 		if (code !== undefined && same(code, exception.annual)) {
 			expected.push({ ...finding, note: `prorated; the annual value is ${fmt(exception.annual)}` });
 		} else {
 			mismatches.push({
 				...finding,
-				note: `CRA's value is prorated; the code should hold the annual ${fmt(exception.annual)}`
+				note: `CRA's value is prorated; rates.json should hold the annual ${fmt(exception.annual)}`
 			});
 		}
 	} else if (code !== undefined && same(code, cra)) {
 		pass(section);
 	} else {
-		mismatches.push(finding);
+		const resolved =
+			typeof fix === 'function' ? { key: `${section} ${item}`, apply: () => fix(cra) } : fix;
+		mismatches.push({ ...finding, fix: resolved });
 	}
 }
 
-const describe = (b: readonly TaxBracket[]) =>
-	b
-		.map((x) => `${pct(x.rate)} ${money(x.min)}–${x.max >= NO_LIMIT ? '' : money(x.max)}`)
+const describe = (rows: readonly BracketRow[]) =>
+	rows
+		.map(
+			([min, rate], i) => `${pct(rate)} ${money(min)}–${rows[i + 1] ? money(rows[i + 1][0]) : ''}`
+		)
 		.join(', ');
 
+/** Compare brackets; any difference is fixed by taking CRA's whole set, if fully parsed */
 function compareBrackets(
 	section: string,
 	label: string,
-	code: readonly TaxBracket[],
-	cra: CraBrackets | undefined
+	code: readonly BracketRow[],
+	cra: CraBrackets | undefined,
+	set: (rows: [number, number][]) => void
 ) {
 	if (!cra) {
 		mismatches.push({ section, item: `${label} brackets`, code: describe(code), cra: 'not found' });
 		return;
 	}
-	compare(section, `${label} bracket count`, code.length, cra.rates.length, String);
+	const rows = cra.rates.map((rate, i): [number, number] => [cra.thresholds[i], rate]);
+	const parsed =
+		cra.rates.length > 0 &&
+		cra.thresholds.length === cra.rates.length &&
+		cra.thresholds[0] === 0 &&
+		allFinite(...cra.thresholds, ...cra.rates);
+	const fix = parsed ? { key: `${label} brackets`, apply: () => set(rows) } : undefined;
+	compare(section, `${label} bracket count`, code.length, cra.rates.length, String, fix);
 	for (let i = 0; i < Math.max(code.length, cra.rates.length); i++) {
-		compare(section, `${label} bracket ${i + 1} from`, code[i]?.min, cra.thresholds[i] ?? NaN);
 		compare(
 			section,
-			`${label} bracket ${i + 1} to`,
-			code[i]?.max,
-			cra.thresholds[i + 1] ?? NO_LIMIT
+			`${label} bracket ${i + 1} from`,
+			code[i]?.[0],
+			cra.thresholds[i] ?? NaN,
+			money,
+			fix
 		);
-		compare(section, `${label} bracket ${i + 1} rate`, code[i]?.rate, cra.rates[i] ?? NaN, pct);
+		compare(section, `${label} bracket ${i + 1} rate`, code[i]?.[1], cra.rates[i] ?? NaN, pct, fix);
 	}
 }
-
-const bracketsEqual = (a: readonly TaxBracket[], b: readonly TaxBracket[]) =>
-	a.length === b.length &&
-	a.every((x, i) => same(x.min, b[i].min) && same(x.max, b[i].max) && same(x.rate, b[i].rate));
-
-// ---------------------------------------------------------------------------
-// Checks
-// ---------------------------------------------------------------------------
 
 /** Reads prefer the latest edition and fall back to January for sections July doesn't reprint */
 class Sources {
@@ -480,7 +531,7 @@ const FACTOR_S = /(?:^|\s)S\s*=/i;
 
 /** Factor S formulas must sit under a recognised province heading to be checked */
 function checkReductionAttribution(src: Sources) {
-	const provinces = new Set(PROVINCES.map((c) => PROVINCE_EXTRAS[c].name.toLowerCase()));
+	const provinces = new Set(PROVINCES.map((c) => PROVINCE_NAMES[c].toLowerCase()));
 	for (const ed of src.editions) {
 		ed.segments.forEach((seg, i) => {
 			if (!FACTOR_S.test(seg.text)) return;
@@ -492,20 +543,30 @@ function checkReductionAttribution(src: Sources) {
 	}
 }
 
+/** Exit, writing the markdown report first if one was asked for */
+function finish(code: 0 | 1 | 2, markdown: string): never {
+	if (args.report) writeFileSync(args.report, markdown);
+	process.exit(code);
+}
+
 async function main() {
 	let jan: Edition;
 	try {
 		jan = await fetchEdition(JAN_URL);
 	} catch (err) {
-		console.error(
-			`Could not load the January T4127 edition (${(err as Error).message}):\n  ${JAN_URL}`
-		);
-		process.exit(1);
+		const message = `Could not load the January T4127 edition (${(err as Error).message}):\n  ${JAN_URL}`;
+		console.error(message);
+		finish(err instanceof NetworkError ? 2 : 1, `## T4127 rate check\n\n${message}\n`);
 	}
 	let jul: Edition | null = null;
 	try {
 		jul = await fetchEdition(JUL_URL);
 	} catch (err) {
+		if (err instanceof NetworkError) {
+			const message = `Could not load the July T4127 edition (${err.message}):\n  ${JUL_URL}`;
+			console.error(message);
+			finish(2, `## T4127 rate check\n\n${message}\n`);
+		}
 		unverified.push(
 			`July T4127 edition (${(err as Error).message}); mid-year changes were not checked`
 		);
@@ -520,16 +581,26 @@ async function main() {
 	if (latest !== jan) console.log(`Also:        ${jan.title}\n  ${jan.url}`);
 	console.log();
 
-	let yearBehind = false;
-	if (latest.year > YEAR) {
-		yearBehind = true;
+	if (latest.year > current.year) {
+		mismatches.push({
+			section: 'Tax year',
+			item: 'Tax year',
+			code: String(current.year),
+			cra: String(latest.year),
+			fix: { key: 'year', apply: () => startYear(latest.year) }
+		});
+	} else if (latest.year < current.year) {
 		console.log(
-			`⚠ CRA has published T4127 for ${latest.year}, but YEAR in src/lib/constants.ts is ${YEAR}.\n` +
-				`  Bump YEAR and update the values flagged below.\n`
+			`ℹ CRA hasn't published T4127 for ${current.year} yet; comparing against ${latest.year}.\n`
 		);
-	} else if (latest.year < YEAR) {
-		console.log(
-			`ℹ CRA hasn't published T4127 for ${YEAR} yet; comparing against ${latest.year}.\n`
+	}
+
+	const year = Math.max(current.year, latest.year);
+	if (current.quebecYear < year) {
+		manual.push(
+			`Quebec: rates.json has Quebec's ${current.quebecYear} provincial brackets and basic personal ` +
+				`amount, and CRA doesn't publish them. Update QC and quebecYear from Quebec Finance's ` +
+				`${year} "Parameters of the personal income tax system": ${QUEBEC_URL(year)}`
 		);
 	}
 
@@ -543,22 +614,53 @@ async function main() {
 
 	// Federal
 	const fed = 'Federal';
-	compareBrackets(fed, 'Federal', FALLBACK_CONFIG.federalBrackets, rates.get('Federal'));
+	const target = proposed.federal;
+	compareBrackets(
+		fed,
+		'Federal',
+		current.federal.brackets,
+		rates.get('Federal'),
+		(rows) => (target.brackets = rows)
+	);
 	const bpaf = bpaFormula(src, 'BPAF');
-	const fp = FALLBACK_CONFIG.federalPersonal;
-	compare(fed, 'Federal basic personal amount', fp.amountMax, bpaf.amountMax);
-	compare(fed, 'Federal basic personal amount minimum', fp.amountMin, bpaf.amountMin);
-	compare(fed, 'Federal BPA clawback start', fp.clawbackStart, bpaf.start);
-	compare(fed, 'Federal BPA clawback end', fp.clawbackEnd, bpaf.end);
+	const fp = current.federal.personalAmount;
+	const fpTarget = target.personalAmount;
+	compare(fed, 'Federal basic personal amount', fp.amountMax, bpaf.amountMax, money, (v) => {
+		fpTarget.amountMax = v;
+	});
+	compare(
+		fed,
+		'Federal basic personal amount minimum',
+		fp.amountMin,
+		bpaf.amountMin,
+		money,
+		(v) => {
+			fpTarget.amountMin = v;
+		}
+	);
+	compare(fed, 'Federal BPA clawback start', fp.clawbackStart, bpaf.start, money, (v) => {
+		fpTarget.clawbackStart = v;
+	});
+	compare(fed, 'Federal BPA clawback end', fp.clawbackEnd, bpaf.end, money, (v) => {
+		fpTarget.clawbackEnd = v;
+	});
 	compare(
 		fed,
 		'Canada employment amount',
-		CANADA_EMPLOYMENT_AMOUNT,
-		otherRow('Federal', fed)?.cea ?? NaN
+		current.federal.canadaEmploymentAmount,
+		otherRow('Federal', fed)?.cea ?? NaN,
+		money,
+		(v) => (target.canadaEmploymentAmount = v)
 	);
-	compare(fed, 'Quebec abatement', QUEBEC_ABATEMENT, otherRow('QC', fed)?.abatement ?? NaN, pct);
+	compare(
+		fed,
+		'Quebec abatement',
+		current.federal.quebecAbatement,
+		otherRow('QC', fed)?.abatement ?? NaN,
+		pct,
+		(v) => (target.quebecAbatement = v)
+	);
 
-	// CPP / CPP2 / EI (scraped live; these are the fallback values)
 	checkContributions(src);
 
 	// Provinces
@@ -571,14 +673,16 @@ async function main() {
 		(rules) => rules.split('\n').every((r) => /^BPAYT\s*=\s*BPAF$/i.test(r))
 	);
 	for (const code of PROVINCES) {
-		const extras = PROVINCE_EXTRAS[code];
+		const prov = current.provinces[code];
+		const provTarget = proposed.provinces[code];
 		const section = 'Personal amounts';
 		const amounts = otherRow(code, section);
-		const clawback = extras.personalAmountClawback;
+		const clawback = prov.personalAmountClawback;
 
 		if (amounts?.basic === 'BPAMB' || amounts?.basic === 'BPAYT') {
 			const formula = amounts.basic === 'BPAMB' ? bpamb : bpaf;
-			if (amounts.basic === 'BPAYT' && yukonMirrorsFederal !== true) {
+			const mirrors = amounts.basic !== 'BPAYT' || yukonMirrorsFederal === true;
+			if (!mirrors) {
 				mismatches.push({
 					section,
 					item: `${code} basic personal amount`,
@@ -586,83 +690,166 @@ async function main() {
 					cra: '"BPAYT = BPAF" is not in the latest BPAYT formula; read it and update YT'
 				});
 			}
-			compare(section, `${code} basic personal amount`, extras.personalAmount, formula.amountMax);
-			compare(section, `${code} BPA minimum`, clawback?.amountMin, formula.amountMin);
-			compare(section, `${code} BPA clawback start`, clawback?.start, formula.start);
-			compare(section, `${code} BPA clawback end`, clawback?.end, formula.end);
+			const { amountMax, amountMin, start, end } = formula;
+			const fix =
+				mirrors && allFinite(amountMax, amountMin, start, end)
+					? {
+							key: `${code} BPA`,
+							apply: () => {
+								provTarget.personalAmount = amountMax;
+								provTarget.personalAmountClawback = { amountMin, start, end };
+							}
+						}
+					: undefined;
+			compare(section, `${code} basic personal amount`, prov.personalAmount, amountMax, money, fix);
+			compare(section, `${code} BPA minimum`, clawback?.amountMin, amountMin, money, fix);
+			compare(section, `${code} BPA clawback start`, clawback?.start, start, money, fix);
+			compare(section, `${code} BPA clawback end`, clawback?.end, end, money, fix);
 		} else if (amounts) {
-			compare(section, `${code} basic personal amount`, extras.personalAmount, num(amounts.basic));
+			compare(
+				section,
+				`${code} basic personal amount`,
+				prov.personalAmount,
+				num(amounts.basic),
+				money,
+				(v) => (provTarget.personalAmount = v)
+			);
 			if (clawback) {
 				mismatches.push({
 					section,
 					item: `${code} BPA clawback`,
 					code: 'has a clawback',
-					cra: `flat ${amounts.basic}`
+					cra: `flat ${amounts.basic}`,
+					fix: {
+						key: `${code} BPA clawback`,
+						apply: () => delete provTarget.personalAmountClawback
+					}
 				});
 			}
 		}
 
 		if (amounts) checkProvincialExtras(src, code, amounts);
-		compareBrackets('Provincial brackets', code, FALLBACK_PROVINCE_BRACKETS[code], rates.get(code));
+		compareBrackets(
+			'Provincial brackets',
+			code,
+			prov.brackets,
+			rates.get(code),
+			(rows) => (provTarget.brackets = rows)
+		);
 	}
 
 	checkReductionAttribution(src);
 	checkHealthPremium(src);
-	await checkRatesPage(latest.year);
-	report(yearBehind);
+	await report(latest, jan);
+}
+
+/** A new tax year: its January edition replaces last year's notes */
+function startYear(year: number) {
+	proposed.year = year;
+	proposed.notes = [
+		`Annual values from CRA T4127 Payroll Deductions Formulas (Jan ${year}) unless noted. Checked by \`pnpm check:rates\`.`,
+		"QC: provincial brackets and basic personal amount are from Quebec Finance's personal income tax parameters for quebecYear; CRA doesn't publish them.",
+		'YT: the basic personal amount mirrors the federal one, including its clawback (BPAYT = BPAF).'
+	];
 }
 
 function checkContributions(src: Sources) {
-	const section = 'CPP / EI fallback';
-	const { cpp, cpp2, ei, eiQuebec } = FALLBACK_CONFIG;
+	const section = 'CPP / EI';
+	const { cpp, cpp2 } = current;
+	const t = proposed;
 	const cppRow = src.table('Table 8.3 ').find((r) => r[0].startsWith('CPP ('));
-	compare(section, 'CPP YMPE', cpp.ympe, num(cppRow?.[1]));
-	compare(section, 'CPP basic exemption', cpp.exemption, num(cppRow?.[2]));
-	compare(section, 'CPP rate', cpp.rate, num(cppRow?.[4]), pct);
-	compare(section, 'CPP maximum', cpp.maxEmployee, num(cppRow?.[5]));
+	compare(section, 'CPP YMPE', cpp.ympe, num(cppRow?.[1]), money, (v) => (t.cpp.ympe = v));
+	compare(section, 'CPP basic exemption', cpp.exemption, num(cppRow?.[2]), money, (v) => {
+		t.cpp.exemption = v;
+	});
+	compare(section, 'CPP rate', cpp.rate, num(cppRow?.[4]), pct, (v) => (t.cpp.rate = v));
+	compare(section, 'CPP maximum', cpp.maxEmployee, num(cppRow?.[5]), money, (v) => {
+		t.cpp.maxEmployee = v;
+	});
 
 	const enhancedRow = src.table('Table 8.5 ').find((r) => r[0].startsWith('CPP ('));
-	compare(section, 'Enhanced CPP rate', CPP_ENHANCED_RATE, num(enhancedRow?.[2]), pct);
+	compare(section, 'Enhanced CPP rate', cpp.enhancedRate, num(enhancedRow?.[2]), pct, (v) => {
+		t.cpp.enhancedRate = v;
+	});
 
 	const cpp2Row = src.table('Table 8.6 ').find((r) => r[0].startsWith('CPP ('));
-	compare(section, 'CPP2 floor (YMPE)', cpp2.floor, num(cpp2Row?.[1]));
-	compare(section, 'CPP2 ceiling (YAMPE)', cpp2.yampe, num(cpp2Row?.[2]));
-	compare(section, 'CPP2 rate', cpp2.rate, num(cpp2Row?.[4]), pct);
-	compare(section, 'CPP2 maximum', cpp2.maxEmployee, num(cpp2Row?.[5]));
+	compare(section, 'CPP2 floor (YMPE)', cpp2.floor, num(cpp2Row?.[1]), money, (v) => {
+		t.cpp2.floor = v;
+	});
+	compare(section, 'CPP2 ceiling (YAMPE)', cpp2.yampe, num(cpp2Row?.[2]), money, (v) => {
+		t.cpp2.yampe = v;
+	});
+	compare(section, 'CPP2 rate', cpp2.rate, num(cpp2Row?.[4]), pct, (v) => (t.cpp2.rate = v));
+	compare(section, 'CPP2 maximum', cpp2.maxEmployee, num(cpp2Row?.[5]), money, (v) => {
+		t.cpp2.maxEmployee = v;
+	});
 
 	const eiRows = src.table('Table 8.7 ');
-	for (const [label, rates, prefix] of [
-		['EI', ei, 'Canada'],
-		['EI (Quebec)', eiQuebec, 'QC']
+	for (const [label, key, prefix] of [
+		['EI', 'ei', 'Canada'],
+		['EI (Quebec)', 'eiQuebec', 'QC']
 	] as const) {
 		const r = eiRows.find((x) => x[0].startsWith(prefix));
-		compare(section, `${label} maximum insurable earnings`, rates.mie, num(r?.[1]));
-		compare(section, `${label} rate`, rates.rate, num(r?.[2]), pct);
-		compare(section, `${label} maximum`, rates.maxEmployee, num(r?.[4]));
+		const rates = current[key];
+		compare(section, `${label} maximum insurable earnings`, rates.mie, num(r?.[1]), money, (v) => {
+			t[key].mie = v;
+		});
+		compare(section, `${label} rate`, rates.rate, num(r?.[2]), pct, (v) => (t[key].rate = v));
+		compare(section, `${label} maximum`, rates.maxEmployee, num(r?.[4]), money, (v) => {
+			t[key].maxEmployee = v;
+		});
 	}
 }
 
 function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherAmounts) {
-	const extras = PROVINCE_EXTRAS[code];
+	const prov = current.provinces[code];
+	const target = proposed.provinces[code];
 
 	// Surtax
-	const surtax = extras.surtax ?? [];
-	compare('Surtax', `${code} surtax steps`, surtax.length, amounts.surtax.length, String);
+	const surtax = prov.surtax ?? [];
+	const surtaxFix = allFinite(...amounts.surtax.flatMap((s) => [s.threshold, s.rate]))
+		? {
+				key: `${code} surtax`,
+				apply: () => {
+					if (amounts.surtax.length) target.surtax = amounts.surtax;
+					else delete target.surtax;
+				}
+			}
+		: undefined;
+	compare(
+		'Surtax',
+		`${code} surtax steps`,
+		surtax.length,
+		amounts.surtax.length,
+		String,
+		surtaxFix
+	);
 	amounts.surtax.forEach((s, i) => {
-		compare('Surtax', `${code} surtax ${i + 1} threshold`, surtax[i]?.threshold, s.threshold);
-		compare('Surtax', `${code} surtax ${i + 1} rate`, surtax[i]?.rate, s.rate, pct);
+		const item = `${code} surtax ${i + 1}`;
+		compare('Surtax', `${item} threshold`, surtax[i]?.threshold, s.threshold, money, surtaxFix);
+		compare('Surtax', `${item} rate`, surtax[i]?.rate, s.rate, pct, surtaxFix);
 	});
 
 	// Canada employment amount (provincial K4P)
-	compare('Credits', `${code} employment amount`, extras.employmentAmount ?? 0, amounts.cea || 0);
+	compare(
+		'Credits',
+		`${code} employment amount`,
+		prov.employmentAmount ?? 0,
+		amounts.cea || 0,
+		money,
+		(v) => {
+			if (v) target.employmentAmount = v;
+			else delete target.employmentAmount;
+		}
+	);
 
 	// Low-income tax reduction (factor S): formula kind from the province's own
 	// section, basic amount from Table 8.2 (S2)
 	const section = 'Tax reductions';
-	const reduction = extras.taxReduction;
+	const reduction = prov.taxReduction;
 	const formula = src.formula(
 		`${code} tax reduction (factor S)`,
-		(ed) => provinceSection(ed, extras.name, FACTOR_S),
+		(ed) => provinceSection(ed, PROVINCE_NAMES[code], FACTOR_S),
 		parseReduction
 	);
 	if (formula === null) return; // present but not parsable: already unverified
@@ -672,7 +859,8 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 				section,
 				item: `${code} tax reduction`,
 				code: reduction.kind,
-				cra: 'none in T4127'
+				cra: 'none in T4127',
+				fix: { key: `${code} tax reduction`, apply: () => delete target.taxReduction }
 			});
 		} else {
 			pass(section);
@@ -689,23 +877,51 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		return;
 	}
 	if (reduction?.kind !== formula.kind) {
+		// calcTaxReduction applies the ontario kind as 2 × basic
+		const replacement =
+			formula.kind === 'ontario'
+				? formula.multiplier === 2 && allFinite(amounts.s2)
+					? { kind: 'ontario' as const, basic: amounts.s2 }
+					: undefined
+				: allFinite(amounts.s2, formula.threshold, formula.rate)
+					? { basic: amounts.s2, ...formula }
+					: undefined;
 		mismatches.push({
 			section,
 			item: `${code} tax reduction formula`,
 			code: reduction?.kind ?? 'none',
-			cra: formula.kind
+			cra: formula.kind,
+			fix: replacement && {
+				key: `${code} tax reduction`,
+				apply: () => (target.taxReduction = replacement)
+			}
 		});
 		return;
 	}
 	pass(section);
-	compare(section, `${code} tax reduction basic amount`, reduction.basic, amounts.s2);
+	const basic = (v: number) => {
+		if (target.taxReduction) target.taxReduction.basic = v;
+	};
+	compare(section, `${code} tax reduction basic amount`, reduction.basic, amounts.s2, money, basic);
 	if (formula.kind === 'ontario') {
-		// calcTaxReduction applies the ontario kind as 2 × basic
+		// calcTaxReduction applies the ontario kind as 2 × basic; another multiplier needs code changes
 		compare(section, `${code} tax reduction multiplier`, 2, formula.multiplier, String);
 	}
 	if (reduction.kind === 'income-tested' && formula.kind === 'income-tested') {
-		compare(section, `${code} tax reduction threshold`, reduction.threshold, formula.threshold);
-		compare(section, `${code} tax reduction rate`, reduction.rate, formula.rate, pct);
+		const t = target.taxReduction as Mutable<typeof reduction>;
+		compare(
+			section,
+			`${code} tax reduction threshold`,
+			reduction.threshold,
+			formula.threshold,
+			money,
+			(v) => {
+				t.threshold = v;
+			}
+		);
+		compare(section, `${code} tax reduction rate`, reduction.rate, formula.rate, pct, (v) => {
+			t.rate = v;
+		});
 	}
 }
 
@@ -723,71 +939,53 @@ function checkHealthPremium(src: Sources) {
 		unverified.push('Ontario Health Premium (V2) formula (not found in any edition)');
 	}
 	if (!tiers) return;
-	const config = { ...FALLBACK_CONFIG } as RateConfig;
-	for (let income = 0; income <= 300_000; income += 50) {
-		const code = calcHealthPremium(income, 'ON', config);
-		const cra = evalPremium(tiers, income);
-		if (Math.abs(code - cra) > 0.005) {
-			compare(section, `premium at ${money(income)} taxable income`, code, cra);
-			return;
-		}
-	}
-	pass(section);
+	const code = current.provinces.ON.healthPremium ?? [];
+	const fix = allFinite(...tiers.flatMap((t) => [t.start, t.base, t.rate, t.cap]))
+		? {
+				key: 'ON health premium',
+				apply: () => {
+					proposed.provinces.ON.healthPremium = tiers.map((t) => ({
+						over: t.start,
+						base: t.base,
+						rate: t.rate,
+						max: t.cap
+					}));
+				}
+			}
+		: undefined;
+	compare(section, 'premium tiers', code.length, tiers.length, String, fix);
+	tiers.forEach((t, i) => {
+		const item = `premium tier ${i + 1}`;
+		compare(section, `${item} starts over`, code[i]?.over, t.start, money, fix);
+		compare(section, `${item} base`, code[i]?.base, t.base, money, fix);
+		compare(section, `${item} rate`, code[i]?.rate, t.rate, pct, fix);
+		compare(section, `${item} maximum`, code[i]?.max, t.cap, money, fix);
+	});
 }
 
-/** Compare what the scraper serves (CRA's public rates page) with the verified brackets */
-async function checkRatesPage(year: number) {
-	const section = 'CRA rates page';
-	let scraped: Awaited<ReturnType<typeof fetchTaxBrackets>>;
-	try {
-		scraped = await fetchTaxBrackets(year);
-	} catch (err) {
-		unverified.push(`CRA's public rates page (${(err as Error).message})`);
-		return;
-	}
-	// Federal brackets are still checked when the page has no provincial ones yet
-	if (Object.keys(scraped.provinces).length === 0) {
-		notes.push(`CRA's public rates page has no ${year} provincial brackets yet.`);
-	}
-	if (scraped.federal.length === 0) {
-		notes.push(`CRA's public rates page has no ${year} federal brackets yet.`);
-	}
-	type Pair = [string, readonly TaxBracket[] | undefined, readonly TaxBracket[], boolean];
-	const pairs: Pair[] = [];
-	if (scraped.federal.length > 0) {
-		pairs.push(['Federal', scraped.federal, FALLBACK_CONFIG.federalBrackets, false]);
-	}
-	if (Object.keys(scraped.provinces).length > 0) {
-		for (const code of PROVINCES) {
-			pairs.push([
-				code,
-				scraped.provinces[code],
-				FALLBACK_PROVINCE_BRACKETS[code],
-				code in PROVINCE_BRACKET_OVERRIDES
-			]);
+async function report(latest: Edition, jan: Edition) {
+	// July tables are prorated, so only a January edition can update rates.json
+	const writable = latest.month === 1;
+	const write = args.write && writable;
+	const applied: Finding[] = [];
+	if (write) {
+		const keys = new Set<string>();
+		for (const f of mismatches) {
+			if (!f.fix) continue;
+			applied.push(f);
+			if (keys.has(f.fix.key)) continue;
+			f.fix.apply();
+			keys.add(f.fix.key);
+		}
+		if (applied.length) {
+			const file = RATES_FILE.pathname;
+			const options = { ...(await resolveConfig(file)), filepath: file };
+			writeFileSync(RATES_FILE, await format(JSON.stringify(proposed, null, '\t'), options));
 		}
 	}
-	for (const [label, live, verified, overridden] of pairs) {
-		const matches = live !== undefined && bracketsEqual(live, verified);
-		if (overridden && matches) {
-			notes.push(
-				`${label}: CRA's rates page now matches, so its PROVINCE_BRACKET_OVERRIDES entry can go.`
-			);
-		} else if (overridden || matches) {
-			pass(section);
-		} else {
-			mismatches.push({
-				section,
-				item: `${label} brackets`,
-				code: describe(verified),
-				cra: live ? `rates page serves ${describe(live)}` : 'missing from rates page',
-				note: 'add a PROVINCE_BRACKET_OVERRIDES entry so the app serves the T4127 brackets'
-			});
-		}
-	}
-}
+	const open = mismatches.filter((m) => !applied.includes(m));
 
-function report(yearBehind: boolean) {
+	// Console
 	const sections = [...new Set([...passed.keys(), ...mismatches.map((m) => m.section)])];
 	for (const section of sections) {
 		const failures = mismatches.filter((m) => m.section === section);
@@ -796,49 +994,105 @@ function report(yearBehind: boolean) {
 			`${failures.length ? '✗' : '✓'} ${section}: ${okCount} match${failures.length ? `, ${failures.length} to update` : ''}`
 		);
 		for (const f of failures) {
+			const status = applied.includes(f)
+				? ' (updated)'
+				: f.fix && writable
+					? ' (--write can update)'
+					: '';
 			console.log(
-				`    ${f.item}: code ${f.code} · CRA ${f.cra}${f.note ? `\n      → ${f.note}` : ''}`
+				`    ${f.item}: rates.json ${f.code} · CRA ${f.cra}${status}${f.note ? `\n      → ${f.note}` : ''}`
 			);
 		}
 	}
-
-	if (unverified.length) {
-		console.log('\n✗ Could not verify:');
-		for (const u of unverified) console.log(`    ${u}`);
+	if (open.some((f) => f.fix) && !writable) {
+		console.log(
+			`\n  July editions show prorated July–December values, so --write won't use them. Find each\n` +
+				`  annual value in the edition's "What's new" section, update rates.json, and add a\n` +
+				`  PRORATED_EXCEPTIONS entry in scripts/check-rates.ts.`
+		);
+	}
+	const lists: [string, string[]][] = [
+		['Needs a person', manual],
+		['Could not verify', unverified]
+	];
+	for (const [title, list] of lists) {
+		if (!list.length) continue;
+		console.log(`\n✗ ${title}:`);
+		for (const u of list) console.log(`    ${u}`);
 	}
 	if (expected.length) {
 		console.log('\nExpected differences (prorated July values):');
 		for (const f of expected)
-			console.log(`    ${f.item}: code ${f.code} · CRA ${f.cra} — ${f.note}`);
+			console.log(`    ${f.item}: rates.json ${f.code} · CRA ${f.cra} — ${f.note}`);
 	}
 	if (notes.length) {
 		console.log('\nNotes:');
 		for (const n of notes) console.log(`    ${n}`);
 	}
-
-	const qc = PROVINCE_EXTRAS.QC;
-	const qcBrackets = PROVINCE_BRACKET_OVERRIDES.QC ?? [];
+	const qc = current.provinces.QC;
 	console.log(
 		`\nQuebec (manual check): CRA doesn't publish Quebec's provincial values.\n` +
 			`  Each November, Québec Finance publishes "Parameters of the personal income tax system"\n` +
-			`  for the coming year (search finances.gouv.qc.ca or quebec.ca). Update QC in\n` +
-			`  PROVINCE_EXTRAS and PROVINCE_BRACKET_OVERRIDES. Currently in code (${YEAR}):\n` +
+			`  for the coming year. Update QC and quebecYear in src/lib/rates.json. Currently (${current.quebecYear}):\n` +
 			`    basic personal amount ${money(qc.personalAmount)}\n` +
-			`    brackets ${describe(qcBrackets)}\n` +
-			`  ${YEAR} source: https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/parametres/AUTEN_IncomeTax${YEAR}.pdf`
+			`    brackets ${describe(qc.brackets)}\n` +
+			`  ${current.quebecYear} source: ${QUEBEC_URL(current.quebecYear)}`
 	);
 
-	const failed = mismatches.length > 0 || unverified.length > 0 || yearBehind;
-	if (failed) {
-		console.log(
-			unverified.length && !mismatches.length
+	const failed = open.length > 0 || unverified.length > 0 || manual.length > 0;
+	if (applied.length) console.log(`\n✓ Updated src/lib/rates.json (${applied.length} values).`);
+	console.log(
+		failed
+			? unverified.length && !open.length && !manual.length
 				? '\n✗ Some rates could not be verified.'
 				: '\n✗ Rates need updating.'
-		);
-	} else {
-		console.log('\n✓ All checked rates match T4127.');
+			: '\n✓ All checked rates match T4127.'
+	);
+
+	// Markdown (for the pull request or issue the scheduled workflow opens)
+	const md: string[] = ['## T4127 rate check', ''];
+	md.push(`Checked against [${latest.title}](${latest.url})`);
+	if (latest !== jan) md.push(`and [${jan.title}](${jan.url})`);
+	md.push('');
+	const row = (f: Finding) =>
+		`| ${f.item} | ${f.code} | ${f.cra} |${f.note ? ` ${f.note} |` : ' |'}`;
+	if (applied.length) {
+		md.push('### Updated in `src/lib/rates.json`', '');
+		md.push('| Item | Was | CRA | Note |', '| --- | --- | --- | --- |', ...applied.map(row), '');
 	}
-	process.exit(failed ? 1 : 0);
+	if (open.length) {
+		md.push('### Needs a person', '');
+		if (open.some((f) => f.fix) && !writable) {
+			md.push(
+				"July editions show prorated July–December values, so these weren't applied. Find each annual value in the edition's \"What's new\" section, update `src/lib/rates.json`, and add a `PRORATED_EXCEPTIONS` entry in `scripts/check-rates.ts`.",
+				''
+			);
+		}
+		md.push(
+			'| Item | rates.json | CRA | Note |',
+			'| --- | --- | --- | --- |',
+			...open.map(row),
+			''
+		);
+	}
+	if (manual.length) {
+		if (!open.length) md.push('### Needs a person', '');
+		md.push(...manual.map((m) => `- ${m}`), '');
+	}
+	if (unverified.length) {
+		md.push('### Could not verify', '', ...unverified.map((u) => `- ${u}`), '');
+	}
+	if (expected.length) {
+		md.push('### Expected differences (prorated July values)', '');
+		md.push(
+			...expected.map((f) => `- ${f.item}: rates.json ${f.code} · CRA ${f.cra} — ${f.note}`),
+			''
+		);
+	}
+	if (notes.length) md.push('### Notes', '', ...notes.map((n) => `- ${n}`), '');
+	if (!failed && !applied.length) md.push('All checked rates match T4127.', '');
+
+	finish(failed ? 1 : 0, md.join('\n'));
 }
 
 await main();

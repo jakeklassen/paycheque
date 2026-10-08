@@ -1,12 +1,13 @@
 <script lang="ts">
 	import './layout.css';
 	import favicon from '#lib/assets/favicon.svg';
+	import { RATES } from '#lib/constants.js';
 
 	let { children } = $props();
 </script>
 
 <svelte:head>
-	<title>Canada 2026 · Paycheck Deduction Calculator</title>
+	<title>Canada {RATES.year} · Paycheck Deduction Calculator</title>
 	<link rel="icon" href={favicon} />
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />

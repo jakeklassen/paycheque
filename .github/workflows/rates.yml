@@ -1,0 +1,98 @@
+# Weekly check of src/lib/rates.json against CRA's T4127 payroll formulas.
+# - January-edition changes: opens (or updates) a pull request with the new values
+# - Anything a person has to resolve (July prorated values, Quebec, page changes):
+#   opens (or updates) an issue, and closes it once everything matches
+# Needs "Allow GitHub Actions to create and approve pull requests" under
+# Settings → Actions → General.
+name: Rate check
+
+on:
+  schedule:
+    - cron: '17 13 * * 1' # Mondays, 9:17 a.m. Eastern (EDT)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: rates
+
+env:
+  ISSUE_TITLE: Rates need a manual check
+  REPORT: ${{ github.workspace }}/../rates-report.md
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v3
+      - run: pnpm install --frozen-lockfile
+
+      - id: rates
+        name: Check (and update) rates
+        run: |
+          set +e
+          pnpm check:rates --write --report "$REPORT"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Fail when CRA can't be reached
+        if: steps.rates.outputs.status == '2'
+        run: exit 1
+
+      - id: diff
+        name: Did rates.json change?
+        run: |
+          if git diff --quiet -- src/lib/rates.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pull requests opened with GITHUB_TOKEN don't trigger CI, so check here
+      - name: Run checks on the updated rates
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          {
+            echo
+            echo '### Checks on the updated rates'
+            echo
+            for cmd in 'pnpm lint' 'pnpm check' 'pnpm test:unit --run --project server'; do
+              if $cmd > /dev/null 2>&1; then
+                echo "- ✅ \`$cmd\`"
+              else
+                echo "- ❌ \`$cmd\` failed ([workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}))"
+              fi
+            done
+          } >> "$REPORT"
+
+      - name: Open or update the pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: rates/t4127-update
+          add-paths: src/lib/rates.json
+          commit-message: 'chore: update rates from CRA T4127'
+          title: Update rates from CRA T4127
+          body-path: ${{ env.REPORT }}
+          delete-branch: true
+
+      - name: Open, update or close the manual-check issue
+        if: steps.diff.outputs.changed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.rates.outputs.status }}
+        run: |
+          number=$(gh issue list --state open --search "in:title \"$ISSUE_TITLE\"" \
+            --json number,title --jq "map(select(.title == \"$ISSUE_TITLE\")) | .[0].number // empty")
+          if [ "$STATUS" = 1 ]; then
+            if [ -n "$number" ]; then
+              gh issue edit "$number" --body-file "$REPORT"
+            else
+              gh issue create --title "$ISSUE_TITLE" --body-file "$REPORT"
+            fi
+          elif [ -n "$number" ]; then
+            gh issue close "$number" --comment 'All checked rates match T4127 now.'
+          fi

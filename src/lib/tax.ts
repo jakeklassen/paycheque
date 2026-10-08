@@ -6,7 +6,6 @@ import type {
 	TaxCredits,
 	TaxReduction
 } from './types';
-import { CANADA_EMPLOYMENT_AMOUNT, QUEBEC_ABATEMENT } from './constants';
 
 export function calcBracketTax(taxableIncome: number, brackets: readonly TaxBracket[]): number {
 	let tax = 0;
@@ -42,24 +41,17 @@ export function calcFederalTax(
 		start: fp.clawbackStart,
 		end: fp.clawbackEnd
 	});
-	const employmentAmount = Math.min(CANADA_EMPLOYMENT_AMOUNT, credits.employmentIncome);
+	const employmentAmount = Math.min(config.canadaEmploymentAmount, credits.employmentIncome);
 	const creditBase = personalAmount + credits.cppBase + credits.ei + employmentAmount;
 	const nonRefundableCredits = creditBase * config.federalBrackets[0].rate;
 	const fedTax = Math.max(0, basicTax - nonRefundableCredits);
 
-	return province === 'QC' ? fedTax * (1 - QUEBEC_ABATEMENT) : fedTax;
+	return province === 'QC' ? fedTax * (1 - config.quebecAbatement) : fedTax;
 }
 
 function calcHealthPremiumFromTiers(income: number, tiers: readonly HealthPremiumTier[]): number {
-	for (const tier of tiers) {
-		if (income <= tier.upTo) {
-			if (tier.marginalRate > 0) {
-				return tier.flat + Math.max(0, income - tier.marginalBase) * tier.marginalRate;
-			}
-			return tier.flat;
-		}
-	}
-	return tiers[tiers.length - 1].flat;
+	const tier = tiers.findLast((t) => income > t.over);
+	return tier ? Math.min(tier.max, tier.base + tier.rate * (income - tier.over)) : 0;
 }
 
 /** Low-income tax reduction (T4127 factor S), for filers with no dependants */
@@ -117,6 +109,6 @@ export function calcHealthPremium(
 	config: RateConfig
 ): number {
 	const prov = config.provinces[province];
-	if (!prov?.healthPremiumTiers?.length) return 0;
-	return calcHealthPremiumFromTiers(taxableIncome, prov.healthPremiumTiers);
+	if (!prov?.healthPremium?.length) return 0;
+	return calcHealthPremiumFromTiers(taxableIncome, prov.healthPremium);
 }

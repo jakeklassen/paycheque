@@ -9,11 +9,12 @@ export interface SurtaxBracket {
 	readonly rate: number;
 }
 
+/** Above `over`: the lesser of `max` and `base` + `rate` × (income − `over`) (T4127 factor V2) */
 export interface HealthPremiumTier {
-	readonly upTo: number;
-	readonly flat: number;
-	readonly marginalRate: number;
-	readonly marginalBase: number;
+	readonly over: number;
+	readonly base: number;
+	readonly rate: number;
+	readonly max: number;
 }
 
 /** Linear reduction of a basic personal amount between two income thresholds */
@@ -46,7 +47,7 @@ export interface ProvinceConfig {
 	readonly taxReduction?: TaxReduction;
 	/** Provincial Canada employment amount (T4127 K4P), where one exists */
 	readonly employmentAmount?: number;
-	readonly healthPremiumTiers?: readonly HealthPremiumTier[];
+	readonly healthPremium?: readonly HealthPremiumTier[];
 }
 
 export type ProvinceCode =
@@ -57,6 +58,8 @@ export interface CppRates {
 	readonly ympe: number;
 	readonly exemption: number;
 	readonly maxEmployee: number;
+	/** Enhanced ("first additional") part of the rate, deducted from income rather than credited */
+	readonly enhancedRate: number;
 }
 
 export interface Cpp2Rates {
@@ -87,12 +90,6 @@ export interface TaxCredits {
 	readonly employmentIncome: number;
 }
 
-export interface RateMeta {
-	readonly lastUpdated: string | null;
-	readonly source: 'scrape' | 'cache' | 'fallback';
-	readonly stale: boolean;
-}
-
 export interface RateConfig {
 	readonly year: number;
 	readonly cpp: CppRates;
@@ -101,8 +98,40 @@ export interface RateConfig {
 	readonly eiQuebec: EiRates;
 	readonly federalBrackets: readonly TaxBracket[];
 	readonly federalPersonal: FederalPersonal;
+	/** Federal Canada employment amount */
+	readonly canadaEmploymentAmount: number;
+	/** Federal tax reduction for Quebec residents */
+	readonly quebecAbatement: number;
 	readonly provinces: Record<string, ProvinceConfig>;
-	readonly meta: RateMeta;
+	/** Year of the Quebec provincial figures, which can lag `year` */
+	readonly quebecYear: number;
+}
+
+/** A tax bracket as [lower threshold, rate]; each runs to the next one's threshold */
+export type BracketRow = readonly [min: number, rate: number];
+
+/** Shape of src/lib/rates.json, which `pnpm check:rates --write` updates */
+export interface RatesData {
+	readonly year: number;
+	/** Year of Quebec Finance's parameters behind the QC entry (CRA doesn't publish them) */
+	readonly quebecYear: number;
+	readonly notes: readonly string[];
+	readonly cpp: CppRates;
+	readonly cpp2: Cpp2Rates;
+	readonly ei: EiRates;
+	readonly eiQuebec: EiRates;
+	readonly federal: {
+		readonly brackets: readonly BracketRow[];
+		readonly personalAmount: FederalPersonal;
+		readonly canadaEmploymentAmount: number;
+		readonly quebecAbatement: number;
+	};
+	readonly provinces: Record<
+		ProvinceCode,
+		Omit<ProvinceConfig, 'name' | 'brackets'> & {
+			readonly brackets: readonly BracketRow[];
+		}
+	>;
 }
 
 export type PayFrequency = 'weekly' | 'biweekly' | 'semi-monthly' | 'monthly' | 'annually';

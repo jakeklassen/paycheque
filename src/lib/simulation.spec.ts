@@ -1,54 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import type { PayFrequency, RateConfig } from './types';
-import { FALLBACK_CONFIG, NO_LIMIT, PAY_FREQUENCIES, PROVINCE_EXTRAS } from './constants';
-import { applyHandMaintainedRates } from './server/scraper';
+import type { PayFrequency, RatesData } from './types';
+import { buildConfig, PAY_FREQUENCIES, PROVINCE_NAMES, RATES } from './constants';
 import { simulate } from './simulation';
+import rates2026 from './test-fixtures/rates-2026.json';
+import currentRates from './rates.json';
 
-// A stale cached config: scraped brackets plus outdated hand-maintained values.
-// applyHandMaintainedRates must replace the outdated parts.
-const CONFIG: RateConfig = applyHandMaintainedRates({
-	...FALLBACK_CONFIG,
-	provinces: {
-		...FALLBACK_CONFIG.provinces,
-		MB: {
-			name: 'Manitoba',
-			personalAmount: 15_780,
-			brackets: [
-				{ min: 0, max: 47_000, rate: 0.108 },
-				{ min: 47_000, max: 100_000, rate: 0.1275 },
-				{ min: 100_000, max: NO_LIMIT, rate: 0.174 }
-			]
-		},
-		BC: {
-			name: 'British Columbia',
-			personalAmount: 12_580,
-			brackets: [{ min: 0, max: NO_LIMIT, rate: 0.0506 }]
-		},
-		PE: {
-			name: 'Prince Edward Island',
-			personalAmount: 13_500,
-			surtax: [{ threshold: 12_500, rate: 0.1 }],
-			brackets: [{ min: 0, max: NO_LIMIT, rate: 0.095 }]
-		}
-	}
-});
+// Expected values are for 2026, so the tests use a frozen copy of the 2026
+// rates; updates to src/lib/rates.json don't change them
+const CONFIG = buildConfig(rates2026 as unknown as RatesData);
 
 describe('simulate', () => {
-	const result = simulate(170_000, 0, 'ON', CONFIG, 'semi-monthly');
+	const result = simulate(100_000, 0, 'ON', CONFIG, 'semi-monthly');
 
 	it('applies CPP/EI deductions and credits to income tax', () => {
-		expect(result.federalTax).toBeCloseTo(30_502.14, 2);
-		expect(result.provincialTax).toBeCloseTo(17_634.79, 2);
+		expect(result.federalTax).toBeCloseTo(13_301.6, 2);
+		expect(result.provincialTax).toBeCloseTo(5_972.75, 2);
 		expect(result.healthPremium).toBe(750);
-		expect(result.totalAnnualNet).toBeCloseTo(115_343.56, 2);
+		expect(result.totalAnnualNet).toBeCloseTo(74_206.13, 2);
 	});
 
 	// Holds here because every contribution reaches its maximum; at lower
 	// salaries per-cheque rounding can move the total by a few cents
-	it('annual net is the same for every pay frequency at $170,000', () => {
+	it('annual net is the same for every pay frequency at $100,000', () => {
 		for (const frequency of Object.keys(PAY_FREQUENCIES) as PayFrequency[]) {
-			const r = simulate(170_000, 0, 'ON', CONFIG, frequency);
-			expect(r.totalAnnualNet).toBeCloseTo(115_343.56, 2);
+			const r = simulate(100_000, 0, 'ON', CONFIG, frequency);
+			expect(r.totalAnnualNet).toBeCloseTo(74_206.13, 2);
 			expect(r.months.reduce((s, m) => s + m.net, 0)).toBeCloseTo(r.paychequeNet, 1);
 		}
 	});
@@ -59,10 +35,10 @@ describe('simulate', () => {
 describe('paycheques', () => {
 	it.each([
 		// frequency, first cheque net, last cheque net, take-home in cheques, refund
-		['semi-monthly', 4_528.22, 5_025.26, 115_343.63, -0.07],
-		['biweekly', 4_179.89, 4_638.7, 115_343.55, 0.01]
-	] as const)('%s at $170,000 in Ontario', (frequency, first, last, paycheques, refund) => {
-		const r = simulate(170_000, 0, 'ON', CONFIG, frequency);
+		['semi-monthly', 3_023.04, 3_317.54, 74_203.94, 2.19],
+		['biweekly', 2_790.49, 3_062.34, 74_204.03, 2.1]
+	] as const)('%s at $100,000 in Ontario', (frequency, first, last, paycheques, refund) => {
+		const r = simulate(100_000, 0, 'ON', CONFIG, frequency);
 		expect(r.firstChequeNet).toBeCloseTo(first, 2);
 		expect(r.lastChequeNet).toBeCloseTo(last, 2);
 		expect(r.paychequeNet).toBeCloseTo(paycheques, 2);
@@ -73,10 +49,10 @@ describe('paycheques', () => {
 	});
 
 	it('maxes out on the expected twice-a-month cheques', () => {
-		const r = simulate(170_000, 0, 'ON', CONFIG, 'semi-monthly');
-		expect(r.eiMaxed).toMatchObject({ period: 10, date: { label: 'May 31' } });
-		expect(r.cppMaxed).toMatchObject({ period: 11, date: { label: 'Jun 15' } });
-		expect(r.cpp2Maxed).toMatchObject({ period: 12, date: { label: 'Jun 30' } });
+		const r = simulate(100_000, 0, 'ON', CONFIG, 'semi-monthly');
+		expect(r.eiMaxed).toMatchObject({ period: 17, date: { label: 'Sep 15' } });
+		expect(r.cppMaxed).toMatchObject({ period: 18, date: { label: 'Sep 30' } });
+		expect(r.cpp2Maxed).toMatchObject({ period: 21, date: { label: 'Nov 15' } });
 	});
 
 	it('collects the full CPP2 despite per-cheque rounding', () => {
@@ -92,7 +68,7 @@ describe('paycheques', () => {
 	});
 
 	it('puts a third biweekly cheque in two months', () => {
-		const r = simulate(170_000, 0, 'ON', CONFIG, 'biweekly');
+		const r = simulate(100_000, 0, 'ON', CONFIG, 'biweekly');
 		expect(r.months.filter((m) => m.cheques === 3).map((m) => m.month)).toEqual(['Jan', 'Jul']);
 	});
 });
@@ -106,28 +82,41 @@ describe('provincial rules', () => {
 		['BC', 35_000, 2_044.32, 717.49], // BC tax reduction partially phased out
 		['BC', 50_000, 3_985.14, 1_859.33], // BC lowest rate 5.60%, reduction fully phased out
 		['PE', 250_000, 53_524.01, 39_444.4], // PEI 20% bracket, no surtax
-		['YT', 170_000, 30_502.14, 13_215.59], // Yukon employment credit
+		['BC', 100_000, 13_301.6, 5_555.52],
+		['YT', 100_000, 13_301.6, 5_930.86], // Yukon employment credit
 		['YT', 220_000, 44_735.53, 19_427.29], // Yukon BPA clawback
 		// Quebec abatement and 2026 brackets only — QPP and QPIP are not modelled,
 		// so this is not a complete Quebec estimate
-		['QC', 170_000, 25_495.86, 30_365.98]
+		['QC', 100_000, 11_133.41, 13_415.34]
 	] as const)('%s at $%i', (province, salary, federal, provincial) => {
 		const r = simulate(salary, 0, province, CONFIG, 'semi-monthly');
 		expect(r.federalTax).toBeCloseTo(federal, 2);
 		expect(r.provincialTax).toBeCloseTo(provincial, 2);
 	});
+});
 
-	it('fills every province when only fallback data is available', () => {
-		const fallback = applyHandMaintainedRates(FALLBACK_CONFIG);
-		expect(Object.keys(fallback.provinces).sort()).toEqual(Object.keys(PROVINCE_EXTRAS).sort());
-		expect(simulate(170_000, 0, 'BC', fallback, 'semi-monthly').provincialTax).toBeCloseTo(
-			14_491.78,
-			2
-		);
+describe('rates.json', () => {
+	const data = currentRates as unknown as RatesData;
+
+	it('has well-formed brackets for federal and every province', () => {
+		const all = [data.federal.brackets, ...Object.values(data.provinces).map((p) => p.brackets)];
+		for (const rows of all) {
+			expect(rows[0]).toEqual([0, expect.any(Number)]);
+			for (const [i, row] of rows.entries()) {
+				expect(row).toHaveLength(2);
+				expect(row[1]).toBeGreaterThan(0);
+				expect(row[1]).toBeLessThan(1);
+				if (i > 0) expect(row[0]).toBeGreaterThan(rows[i - 1][0]);
+			}
+		}
 	});
 
-	it('replaces outdated cached personal amounts and surtaxes', () => {
-		expect(CONFIG.provinces.BC.personalAmount).toBe(PROVINCE_EXTRAS.BC.personalAmount);
-		expect(CONFIG.provinces.PE.surtax).toBeUndefined();
+	it('builds a config for every province', () => {
+		expect(Object.keys(data.provinces).sort()).toEqual(Object.keys(PROVINCE_NAMES).sort());
+		for (const code of Object.keys(PROVINCE_NAMES)) {
+			const r = simulate(100_000, 0, code, RATES, 'semi-monthly');
+			expect(r.totalAnnualNet).toBeGreaterThan(50_000);
+			expect(r.totalAnnualNet).toBeLessThan(100_000);
+		}
 	});
 });
