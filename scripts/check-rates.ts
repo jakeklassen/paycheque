@@ -11,7 +11,7 @@
  * differences are left for a person to resolve.
  *
  * Exit codes: 0 nothing left to do (after any --write), 1 something needs a
- * person, 2 CRA could not be reached.
+ * person, 2 CRA could not be reached, 3 the check itself failed.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { get as httpsGet } from 'node:https';
@@ -20,6 +20,14 @@ import { load, type CheerioAPI } from 'cheerio';
 import { format, resolveConfig } from 'prettier';
 import { NO_LIMIT, PROVINCE_NAMES } from '../src/lib/constants.ts';
 import type { BracketRow, ProvinceCode, RatesData } from '../src/lib/types.ts';
+
+// An unexpected error means the check itself failed (3), not that rates need a person (1).
+// Errors importing modules (constants.ts imports rates.json) happen before this and
+// exit 1; the workflow treats the missing report as a failed check.
+process.on('uncaughtException', (err) => {
+	console.error(err);
+	process.exit(3);
+});
 
 const T4127 =
 	'https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas';
@@ -42,6 +50,18 @@ const PRORATED_EXCEPTIONS: Record<string, { cra: number; annual: number }> = {
 	'2026-07 PE bracket 6 rate': { cra: 0.21, annual: 0.2 }
 };
 
+/**
+ * Mid-year changes already in rates.json that the edition being checked
+ * doesn't have yet: a change announced after the January edition, say, until
+ * the July edition shows it. Differences in these are expected, and --write
+ * leaves them alone. Keyed by "<year>-<month> <name>", where the name is an
+ * item as the report names it ("NL basic personal amount") or a set that's
+ * replaced as a whole ("PE brackets", "MB BPA", "ON health premium"). An item
+ * in a set holds the whole set: --write won't replace it for another item's
+ * sake. The value says what changed.
+ */
+const MID_YEAR_CHANGES: Record<string, string> = {};
+
 const PROVINCES = (Object.keys(PROVINCE_NAMES) as ProvinceCode[]).filter((c) => c !== 'QC');
 
 const RATES_FILE = new URL('../src/lib/rates.json', import.meta.url);
@@ -62,29 +82,67 @@ const args = parseArgs({
 const USER_AGENT =
 	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const FETCH_TIMEOUT_MS = 20_000;
+/** A slow trickle never trips the idle timeout above, so cap the whole download too */
+const FETCH_DEADLINE_MS = 120_000;
 
 /** CRA couldn't be reached, as opposed to a page that changed shape */
 class NetworkError extends Error {}
 
+/** A page that moved or changed shape: something a person has to look at */
+class PageError extends Error {}
+
 /**
  * Fetch with node:https rather than fetch: Canada.ca's Akamai CDN blocks
- * undici's TLS fingerprint.
+ * undici's TLS fingerprint. Follows redirects within the same host. Server
+ * errors, rate limits and blocks (403) are network failures; any other
+ * non-200 response means the page has moved.
  */
-function fetchPage(url: string): Promise<string> {
+function fetchPage(
+	url: string,
+	redirects = 5,
+	deadline = Date.now() + FETCH_DEADLINE_MS
+): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const req = httpsGet(url, { headers: { 'User-Agent': USER_AGENT } }, (res) => {
+			const status = res.statusCode ?? 0;
+			const location = res.headers.location;
+			if (status !== 200) {
+				res.resume();
+				const next = location ? URL.parse(location, url) : null;
+				if (
+					status >= 300 &&
+					status < 400 &&
+					next?.origin === new URL(url).origin &&
+					redirects > 0
+				) {
+					resolve(fetchPage(next.href, redirects - 1, deadline));
+				} else if (status >= 500 || [403, 408, 429].includes(status)) {
+					reject(new NetworkError(`HTTP ${status}`));
+				} else {
+					const to = next ? ` to ${next.href}` : location ? ` to "${location}"` : '';
+					reject(new PageError(`HTTP ${status}${to}; has the page moved?`));
+				}
+				return;
+			}
+			// Decode as a stream so a character split across chunks stays intact
+			res.setEncoding('utf8');
 			let data = '';
 			res.on('data', (chunk: string) => (data += chunk));
-			res.on('end', () =>
-				res.statusCode === 200
-					? resolve(data)
-					: reject(new NetworkError(`HTTP ${res.statusCode ?? 0}`))
-			);
+			res.on('end', () => resolve(data));
+			res.on('error', (err) => reject(new NetworkError(err.message)));
+			res.on('close', () => {
+				if (!res.complete) reject(new NetworkError('connection closed mid-download'));
+			});
 		});
 		req.on('error', (err) => reject(new NetworkError(err.message)));
 		req.setTimeout(FETCH_TIMEOUT_MS, () => {
 			req.destroy(new Error(`timed out after ${FETCH_TIMEOUT_MS}ms`));
 		});
+		// The deadline covers redirects too
+		setTimeout(
+			() => req.destroy(new Error(`took over ${FETCH_DEADLINE_MS}ms`)),
+			deadline - Date.now()
+		).unref();
 	});
 }
 
@@ -111,14 +169,24 @@ interface Segment {
 
 const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
 
-/** Parse "$1,234.50", "0.0595", "142,520*" etc. Returns NaN for blanks and dashes. */
-const num = (s: string | undefined) => (s ? parseFloat(s.replace(/[$,*\s]/g, '')) : NaN);
+/**
+ * Parse "$1,234.50", "0.0595", "142,520*" etc. Returns NaN for blanks, dashes
+ * and anything else that isn't wholly a number ("3OO" isn't 3).
+ */
+const num = (s: string | undefined) => {
+	const digits = s?.replace(/[$,*\s]/g, '');
+	return digits ? Number(digits) : NaN;
+};
+
+/** A table cell's number: null when blank or a dash, NaN when unreadable or the column is missing */
+const cell = (s: string | undefined) =>
+	s === undefined ? NaN : /^[\s–—-]*$/.test(s) ? null : num(s);
 
 async function fetchEdition(url: string): Promise<Edition> {
 	const $ = load(await fetchPage(url));
 	const title = clean($('h1').first().text());
 	const m = title.match(/Effective (January|July) 1, (\d{4})/);
-	if (!m) throw new Error(`unrecognised page title "${title}"`);
+	if (!m) throw new PageError(`unrecognised page title "${title}"`);
 	const segments = parseSegments($('main').html() ?? '');
 	return {
 		url,
@@ -214,11 +282,13 @@ function parseRateTable(rows: string[][]): Map<string, CraBrackets> {
 	return out;
 }
 
+/** Table 8.2 values: null where CRA leaves the cell blank, NaN where it can't be read */
 interface OtherAmounts {
+	/** A dollar amount, or the name of a formula such as BPAMB */
 	basic: string;
-	cea: number;
-	s2: number;
-	abatement: number;
+	cea: number | null;
+	s2: number | null;
+	abatement: number | null;
 	surtax: { threshold: number; rate: number }[];
 }
 
@@ -226,7 +296,11 @@ interface OtherAmounts {
 function parseOtherTable(rows: string[][]): Map<string, OtherAmounts> {
 	const out = new Map<string, OtherAmounts>();
 	if (rows.length === 0) return out;
-	const col = (name: string) => rows[0].indexOf(name);
+	const col = (name: string) => {
+		const i = rows[0].indexOf(name);
+		if (i === -1) unverified.push(`Table 8.2 has no "${name}" column`);
+		return i;
+	};
 	const [iBasic, iCea, iS2, iT4, iV1, iAbate] = [
 		'Basic amount',
 		'CEA',
@@ -235,25 +309,30 @@ function parseOtherTable(rows: string[][]): Map<string, OtherAmounts> {
 		'V1 rate',
 		'Abatement'
 	].map(col);
-	let current: OtherAmounts | null = null;
+	const surtax = new Map<string, { threshold: number | null; rate: number | null }[]>();
+	let current: string | null = null;
 	for (const row of rows.slice(1)) {
 		const isJurisdiction = row[0] === 'Federal' || /^[A-Z]{2}$/.test(row[0]);
 		if (isJurisdiction) {
-			current = {
-				basic: row[iBasic],
-				cea: num(row[iCea]),
-				s2: num(row[iS2]),
-				abatement: num(row[iAbate]),
-				surtax: [{ threshold: num(row[iT4]), rate: num(row[iV1]) }]
-			};
-			out.set(row[0], current);
+			current = row[0];
+			out.set(current, {
+				basic: row[iBasic] ?? '',
+				cea: cell(row[iCea]),
+				s2: cell(row[iS2]),
+				abatement: cell(row[iAbate]),
+				surtax: []
+			});
+			surtax.set(current, [{ threshold: cell(row[iT4]), rate: cell(row[iV1]) }]);
 		} else if (current && row[0] !== '' && !row[0].startsWith('Outside')) {
 			// Continuation rows hold further surtax steps: "T4 to V1 | V1 rate"
-			current.surtax.push({ threshold: num(row[0]), rate: num(row[1]) });
+			surtax.get(current)?.push({ threshold: cell(row[0]), rate: cell(row[1]) });
 		}
 	}
-	for (const amounts of out.values()) {
-		amounts.surtax = amounts.surtax.filter((s) => s.rate > 0);
+	for (const [code, steps] of surtax) {
+		// A blank or zero rate is no step; an unreadable one stays (as NaN) so it can't be dropped
+		out.get(code)!.surtax = steps
+			.filter((s) => s.rate !== null && s.rate !== 0)
+			.map((s) => ({ threshold: s.threshold ?? NaN, rate: s.rate ?? NaN }));
 	}
 	return out;
 }
@@ -300,20 +379,26 @@ interface PremiumTier {
 	rate: number;
 }
 
-/** Ontario Health Premium (V2): "the lesser of: (i) $cap; (ii) $base + (rate × (A – $start))" */
-function parseHealthPremium(text: string): PremiumTier[] {
+/**
+ * Ontario Health Premium (V2): "the lesser of: (i) $cap; (ii) $base + (rate × (A – $start))".
+ * Null unless every tier parses.
+ */
+function parseHealthPremium(text: string): PremiumTier[] | null {
 	const from = text.search(/V2\s*=\s*Where A/i);
-	if (from === -1) return [];
+	if (from === -1) return null;
 	const to = text.slice(from).search(/Note:/i);
 	const block = to === -1 ? text.slice(from) : text.slice(from, from + to);
 	const tierPattern =
 		/\(i\) \$([\d,]+); \(ii\) (?:\$([\d,]+) \+ \()?([\d.]+) × \(A – \$([\d,]+)\)/gi;
-	return [...block.matchAll(tierPattern)].map((m) => ({
+	const tiers = [...block.matchAll(tierPattern)].map((m) => ({
 		cap: num(m[1]),
 		base: m[2] ? num(m[2]) : 0,
 		rate: num(m[3]),
 		start: num(m[4])
 	}));
+	// Every "lesser of" clause is a tier; one that didn't match must not be dropped
+	const clauses = block.match(/the lesser of/gi)?.length ?? 0;
+	return tiers.length > 0 && tiers.length === clauses ? tiers : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +639,9 @@ async function main() {
 	try {
 		jan = await fetchEdition(JAN_URL);
 	} catch (err) {
-		const message = `Could not load the January T4127 edition (${(err as Error).message}):\n  ${JAN_URL}`;
+		// Anything else is a bug in the check (exit 3), not a changed page
+		if (!(err instanceof NetworkError || err instanceof PageError)) throw err;
+		const message = `Could not load the January T4127 edition (${err.message}):\n  ${JAN_URL}`;
 		console.error(message);
 		finish(err instanceof NetworkError ? 2 : 1, `## T4127 rate check\n\n${message}\n`);
 	}
@@ -562,17 +649,32 @@ async function main() {
 	try {
 		jul = await fetchEdition(JUL_URL);
 	} catch (err) {
+		if (!(err instanceof NetworkError || err instanceof PageError)) throw err;
 		if (err instanceof NetworkError) {
 			const message = `Could not load the July T4127 edition (${err.message}):\n  ${JUL_URL}`;
 			console.error(message);
 			finish(2, `## T4127 rate check\n\n${message}\n`);
 		}
 		unverified.push(
-			`July T4127 edition (${(err as Error).message}); mid-year changes were not checked`
+			`July T4127 edition (${err.message}); mid-year changes were not checked, so --write ` +
+				`only applies a new year's January edition`
 		);
 	}
 
-	// Before July, the July URL still holds last year's edition
+	// Before July, the July URL still holds last year's edition. From July 1, or
+	// once an entry shows this year's July edition exists, an older one is stale.
+	const julyKeys = [...Object.keys(PRORATED_EXCEPTIONS), ...Object.keys(MID_YEAR_CHANGES)];
+	const julyDue =
+		new Date() >= new Date(Date.UTC(jan.year, 6, 1)) ||
+		julyKeys.some((k) => k.startsWith(`${jan.year}-07 `));
+	if (jul && jul.year < jan.year && julyDue) {
+		unverified.push(
+			`July T4127 edition: ${JUL_URL} still shows "${jul.title}" although the ${jan.year} ` +
+				`edition should be out; mid-year changes were not checked, so --write only applies ` +
+				`a new year's January edition`
+		);
+		jul = null;
+	}
 	const latest = jul && jul.year === jan.year ? jul : jan;
 	const src = new Sources(latest, jan);
 	editionKey = `${latest.year}-${String(latest.month).padStart(2, '0')}`;
@@ -589,6 +691,13 @@ async function main() {
 			cra: String(latest.year),
 			fix: { key: 'year', apply: () => startYear(latest.year) }
 		});
+		const thisYear = new Date().getFullYear();
+		if (latest.year > thisYear) {
+			notes.push(
+				`These are ${latest.year} rates, which take effect January 1, ${latest.year}. ` +
+					`Merging before then switches the site to ${latest.year} during ${thisYear}.`
+			);
+		}
 	} else if (latest.year < current.year) {
 		console.log(
 			`ℹ CRA hasn't published T4127 for ${current.year} yet; comparing against ${latest.year}.\n`
@@ -679,9 +788,11 @@ async function main() {
 		const amounts = otherRow(code, section);
 		const clawback = prov.personalAmountClawback;
 
-		if (amounts?.basic === 'BPAMB' || amounts?.basic === 'BPAYT') {
-			const formula = amounts.basic === 'BPAMB' ? bpamb : bpaf;
-			const mirrors = amounts.basic !== 'BPAYT' || yukonMirrorsFederal === true;
+		// "BPAMB", or with a footnote marker, "BPAMB*"
+		const basicFormula = amounts?.basic.replace(/[*\s]/g, '').toUpperCase();
+		if (basicFormula === 'BPAMB' || basicFormula === 'BPAYT') {
+			const formula = basicFormula === 'BPAMB' ? bpamb : bpaf;
+			const mirrors = basicFormula !== 'BPAYT' || yukonMirrorsFederal === true;
 			if (!mirrors) {
 				mismatches.push({
 					section,
@@ -706,15 +817,17 @@ async function main() {
 			compare(section, `${code} BPA clawback start`, clawback?.start, start, money, fix);
 			compare(section, `${code} BPA clawback end`, clawback?.end, end, money, fix);
 		} else if (amounts) {
+			const flat = num(amounts.basic);
 			compare(
 				section,
 				`${code} basic personal amount`,
 				prov.personalAmount,
-				num(amounts.basic),
+				flat,
 				money,
 				(v) => (provTarget.personalAmount = v)
 			);
-			if (clawback) {
+			// Only a readable flat amount shows the clawback is gone
+			if (clawback && Number.isFinite(flat)) {
 				mismatches.push({
 					section,
 					item: `${code} BPA clawback`,
@@ -740,7 +853,7 @@ async function main() {
 
 	checkReductionAttribution(src);
 	checkHealthPremium(src);
-	await report(latest, jan);
+	await report(latest, jan, jul !== null);
 }
 
 /** A new tax year: its January edition replaces last year's notes */
@@ -835,7 +948,7 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		'Credits',
 		`${code} employment amount`,
 		prov.employmentAmount ?? 0,
-		amounts.cea || 0,
+		amounts.cea ?? 0,
 		money,
 		(v) => {
 			if (v) target.employmentAmount = v;
@@ -853,7 +966,16 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		parseReduction
 	);
 	if (formula === null) return; // present but not parsable: already unverified
-	if (formula === undefined && Number.isNaN(amounts.s2)) {
+	if (Number.isNaN(amounts.s2)) {
+		mismatches.push({
+			section,
+			item: `${code} tax reduction basic amount`,
+			code: reduction ? money(reduction.basic) : 'none',
+			cra: 'not readable (has the CRA page changed?)'
+		});
+		return;
+	}
+	if (formula === undefined && amounts.s2 === null) {
 		if (reduction) {
 			mismatches.push({
 				section,
@@ -867,12 +989,14 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		}
 		return;
 	}
+	// A factor S formula with a blank S2 has no basic amount to apply
+	const s2 = amounts.s2 ?? NaN;
 	if (!formula) {
 		mismatches.push({
 			section,
 			item: `${code} tax reduction formula`,
 			code: reduction?.kind ?? 'none',
-			cra: `S2 of ${money(amounts.s2)} but no factor S formula found (has the CRA page changed?)`
+			cra: `S2 of ${money(s2)} but no factor S formula found (has the CRA page changed?)`
 		});
 		return;
 	}
@@ -880,11 +1004,11 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		// calcTaxReduction applies the ontario kind as 2 × basic
 		const replacement =
 			formula.kind === 'ontario'
-				? formula.multiplier === 2 && allFinite(amounts.s2)
-					? { kind: 'ontario' as const, basic: amounts.s2 }
+				? formula.multiplier === 2 && allFinite(s2)
+					? { kind: 'ontario' as const, basic: s2 }
 					: undefined
-				: allFinite(amounts.s2, formula.threshold, formula.rate)
-					? { basic: amounts.s2, ...formula }
+				: allFinite(s2, formula.threshold, formula.rate)
+					? { basic: s2, ...formula }
 					: undefined;
 		mismatches.push({
 			section,
@@ -902,7 +1026,7 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 	const basic = (v: number) => {
 		if (target.taxReduction) target.taxReduction.basic = v;
 	};
-	compare(section, `${code} tax reduction basic amount`, reduction.basic, amounts.s2, money, basic);
+	compare(section, `${code} tax reduction basic amount`, reduction.basic, s2, money, basic);
 	if (formula.kind === 'ontario') {
 		// calcTaxReduction applies the ontario kind as 2 × basic; another multiplier needs code changes
 		compare(section, `${code} tax reduction multiplier`, 2, formula.multiplier, String);
@@ -930,10 +1054,7 @@ function checkHealthPremium(src: Sources) {
 	const tiers = src.formula(
 		'Ontario Health Premium (V2) formula',
 		(ed) => definedIn(ed, 'V2'),
-		(t) => {
-			const parsed = parseHealthPremium(t);
-			return parsed.length > 0 ? parsed : null;
-		}
+		parseHealthPremium
 	);
 	if (tiers === undefined) {
 		unverified.push('Ontario Health Premium (V2) formula (not found in any edition)');
@@ -963,10 +1084,42 @@ function checkHealthPremium(src: Sources) {
 	});
 }
 
-async function report(latest: Edition, jan: Edition) {
+/** The MID_YEAR_CHANGES entry covering a finding, by its item or its group */
+function midYearChange(f: Finding): string | undefined {
+	// Only a value read from CRA (which is what carries a fix) can be a known
+	// difference; an unreadable one still needs a person
+	if (!f.fix) return undefined;
+	for (const [key, change] of Object.entries(MID_YEAR_CHANGES)) {
+		if (!key.startsWith(`${editionKey} `)) continue;
+		const name = key.slice(editionKey.length + 1);
+		if (f.item === name || f.fix.key === name) return change;
+	}
+	return undefined;
+}
+
+/**
+ * @param julChecked whether the July edition loaded (and wasn't stale). Without
+ *   it, the January edition can't be known to be the latest, and its values
+ *   could undo mid-year changes, so only a new year's edition is written: a new
+ *   year has no mid-year changes yet.
+ */
+async function report(latest: Edition, jan: Edition, julChecked: boolean) {
 	// July tables are prorated, so only a January edition can update rates.json
-	const writable = latest.month === 1;
+	const writable = latest.month === 1 && (julChecked || latest.year > current.year);
 	const write = args.write && writable;
+	// A set holding a mid-year change isn't replaced for another item's sake either
+	const held = new Set<string>();
+	for (const f of mismatches.filter((m) => midYearChange(m))) {
+		mismatches.splice(mismatches.indexOf(f), 1);
+		expected.push({ ...f, note: `mid-year change: ${midYearChange(f)}` });
+		if (f.fix) held.add(f.fix.key);
+	}
+	for (const f of mismatches) {
+		if (f.fix && held.has(f.fix.key)) {
+			f.note = `not updated: ${f.fix.key} includes a mid-year change; update it by hand`;
+			delete f.fix;
+		}
+	}
 	const applied: Finding[] = [];
 	if (write) {
 		const keys = new Set<string>();
@@ -1004,7 +1157,7 @@ async function report(latest: Edition, jan: Edition) {
 			);
 		}
 	}
-	if (open.some((f) => f.fix) && !writable) {
+	if (open.some((f) => f.fix) && latest.month === 7) {
 		console.log(
 			`\n  July editions show prorated July–December values, so --write won't use them. Find each\n` +
 				`  annual value in the edition's "What's new" section, update rates.json, and add a\n` +
@@ -1021,7 +1174,7 @@ async function report(latest: Edition, jan: Edition) {
 		for (const u of list) console.log(`    ${u}`);
 	}
 	if (expected.length) {
-		console.log('\nExpected differences (prorated July values):');
+		console.log('\nExpected differences:');
 		for (const f of expected)
 			console.log(`    ${f.item}: rates.json ${f.code} · CRA ${f.cra} — ${f.note}`);
 	}
@@ -1062,7 +1215,7 @@ async function report(latest: Edition, jan: Edition) {
 	}
 	if (open.length) {
 		md.push('### Needs a person', '');
-		if (open.some((f) => f.fix) && !writable) {
+		if (open.some((f) => f.fix) && latest.month === 7) {
 			md.push(
 				"July editions show prorated July–December values, so these weren't applied. Find each annual value in the edition's \"What's new\" section, update `src/lib/rates.json`, and add a `PRORATED_EXCEPTIONS` entry in `scripts/check-rates.ts`.",
 				''
@@ -1083,7 +1236,7 @@ async function report(latest: Edition, jan: Edition) {
 		md.push('### Could not verify', '', ...unverified.map((u) => `- ${u}`), '');
 	}
 	if (expected.length) {
-		md.push('### Expected differences (prorated July values)', '');
+		md.push('### Expected differences', '');
 		md.push(
 			...expected.map((f) => `- ${f.item}: rates.json ${f.code} · CRA ${f.cra} — ${f.note}`),
 			''

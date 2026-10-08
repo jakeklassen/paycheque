@@ -30,6 +30,13 @@ pnpm check:rates           # compare rates.json with CRA's T4127
 pnpm check:rates --write   # also update rates.json from a January edition
 ```
 
+When a province changes a rate mid-year, update `rates.json` with the annual value and record the
+change in `scripts/check-rates.ts`, or `--write` will put back the old value:
+
+- Before CRA's July edition: add a `MID_YEAR_CHANGES` entry for the January edition, such as
+  `'2027-01 NL basic personal amount'` or `'2027-01 PE brackets'`.
+- Once the July edition shows the prorated July–December value: add a `PRORATED_EXCEPTIONS` entry.
+
 CRA doesn't publish Quebec's provincial brackets or basic personal amount. Update those (and
 `quebecYear`) from Québec Finance's "Parameters of the personal income tax system", published each
 November.
@@ -43,8 +50,8 @@ expected values don't change when `rates.json` does.
   request; deploys `main` to GitHub Pages.
 - **Rate check** (`.github/workflows/rates.yml`): every Monday, runs `pnpm check:rates --write`.
   New January-edition values become a pull request; anything that needs a person (July prorated
-  values, Quebec, a changed CRA page) becomes an issue, which closes itself once everything
-  matches.
+  values, Quebec, a changed or moved CRA page) becomes an issue, which closes itself once nothing
+  is left. If CRA can't be reached or the check itself fails, the run fails.
 
 One-time setup:
 
