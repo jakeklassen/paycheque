@@ -97,7 +97,11 @@ class PageError extends Error {}
  * errors, rate limits and blocks (403) are network failures; any other
  * non-200 response means the page has moved.
  */
-function fetchPage(url: string, redirects = 5): Promise<string> {
+function fetchPage(
+	url: string,
+	redirects = 5,
+	deadline = Date.now() + FETCH_DEADLINE_MS
+): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const req = httpsGet(url, { headers: { 'User-Agent': USER_AGENT } }, (res) => {
 			const status = res.statusCode ?? 0;
@@ -111,7 +115,7 @@ function fetchPage(url: string, redirects = 5): Promise<string> {
 					next?.origin === new URL(url).origin &&
 					redirects > 0
 				) {
-					resolve(fetchPage(next.href, redirects - 1));
+					resolve(fetchPage(next.href, redirects - 1, deadline));
 				} else if (status >= 500 || [403, 408, 429].includes(status)) {
 					reject(new NetworkError(`HTTP ${status}`));
 				} else {
@@ -134,9 +138,11 @@ function fetchPage(url: string, redirects = 5): Promise<string> {
 		req.setTimeout(FETCH_TIMEOUT_MS, () => {
 			req.destroy(new Error(`timed out after ${FETCH_TIMEOUT_MS}ms`));
 		});
-		setTimeout(() => {
-			req.destroy(new Error(`took over ${FETCH_DEADLINE_MS}ms`));
-		}, FETCH_DEADLINE_MS).unref();
+		// The deadline covers redirects too
+		setTimeout(
+			() => req.destroy(new Error(`took over ${FETCH_DEADLINE_MS}ms`)),
+			deadline - Date.now()
+		).unref();
 	});
 }
 
@@ -651,11 +657,24 @@ async function main() {
 		}
 		unverified.push(
 			`July T4127 edition (${err.message}); mid-year changes were not checked, so --write ` +
-				`didn't apply the January edition's values`
+				`only applies a new year's January edition`
 		);
 	}
 
-	// Before July, the July URL still holds last year's edition
+	// Before July, the July URL still holds last year's edition. From July 1, or
+	// once an entry shows this year's July edition exists, an older one is stale.
+	const julyKeys = [...Object.keys(PRORATED_EXCEPTIONS), ...Object.keys(MID_YEAR_CHANGES)];
+	const julyDue =
+		new Date() >= new Date(Date.UTC(jan.year, 6, 1)) ||
+		julyKeys.some((k) => k.startsWith(`${jan.year}-07 `));
+	if (jul && jul.year < jan.year && julyDue) {
+		unverified.push(
+			`July T4127 edition: ${JUL_URL} still shows "${jul.title}" although the ${jan.year} ` +
+				`edition should be out; mid-year changes were not checked, so --write only applies ` +
+				`a new year's January edition`
+		);
+		jul = null;
+	}
 	const latest = jul && jul.year === jan.year ? jul : jan;
 	const src = new Sources(latest, jan);
 	editionKey = `${latest.year}-${String(latest.month).padStart(2, '0')}`;
@@ -1079,13 +1098,14 @@ function midYearChange(f: Finding): string | undefined {
 }
 
 /**
- * @param julChecked whether the July edition loaded. Without it, the January
- *   edition can't be known to be the latest, and its values could undo
- *   mid-year changes, so nothing is written.
+ * @param julChecked whether the July edition loaded (and wasn't stale). Without
+ *   it, the January edition can't be known to be the latest, and its values
+ *   could undo mid-year changes, so only a new year's edition is written: a new
+ *   year has no mid-year changes yet.
  */
 async function report(latest: Edition, jan: Edition, julChecked: boolean) {
 	// July tables are prorated, so only a January edition can update rates.json
-	const writable = latest.month === 1 && julChecked;
+	const writable = latest.month === 1 && (julChecked || latest.year > current.year);
 	const write = args.write && writable;
 	// A set holding a mid-year change isn't replaced for another item's sake either
 	const held = new Set<string>();
