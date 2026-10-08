@@ -1,7 +1,8 @@
 # Weekly check of src/lib/rates.json against CRA's T4127 payroll formulas.
 # - January-edition changes: opens (or updates) a pull request with the new values
 # - Anything a person has to resolve (July prorated values, Quebec, page changes):
-#   opens (or updates) an issue, and closes it once everything matches
+#   opens (or updates) an issue, and closes it once nothing is left
+# - CRA unreachable, or the check itself fails: the run fails
 # Needs "Allow GitHub Actions to create and approve pull requests" under
 # Settings → Actions → General.
 name: Rate check
@@ -35,12 +36,26 @@ jobs:
         name: Check (and update) rates
         run: |
           set +e
+          rm -f "$REPORT"
           pnpm check:rates --write --report "$REPORT"
-          echo "status=$?" >> "$GITHUB_OUTPUT"
+          status=$?
+          # Every result writes the report; without one (rates.json unreadable,
+          # say) the check didn't finish, whatever its exit code
+          [ -s "$REPORT" ] || status=3
+          echo "status=$status" >> "$GITHUB_OUTPUT"
 
-      - name: Fail when CRA can't be reached
-        if: steps.rates.outputs.status == '2'
-        run: exit 1
+      # 0 and 1 are results; anything else (2 unreachable, 3 failed, a crash) is not
+      - name: Fail when the check didn't finish
+        if: steps.rates.outputs.status != '0' && steps.rates.outputs.status != '1'
+        env:
+          STATUS: ${{ steps.rates.outputs.status }}
+        run: |
+          if [ "$STATUS" = 2 ]; then
+            echo "::error::CRA couldn't be reached"
+          else
+            echo "::error::The rate check failed (exit $STATUS)"
+          fi
+          exit 1
 
       - id: diff
         name: Did rates.json change?
@@ -68,7 +83,8 @@ jobs:
             done
           } >> "$REPORT"
 
-      - name: Open or update the pull request
+      - id: pr
+        name: Open or update the pull request
         if: steps.diff.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
@@ -79,20 +95,25 @@ jobs:
           body-path: ${{ env.REPORT }}
           delete-branch: true
 
+      # Runs whether or not a pull request was opened: status 1 means something
+      # still needs a person after the update
       - name: Open, update or close the manual-check issue
-        if: steps.diff.outputs.changed == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           STATUS: ${{ steps.rates.outputs.status }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
         run: |
           number=$(gh issue list --state open --search "in:title \"$ISSUE_TITLE\"" \
             --json number,title --jq "map(select(.title == \"$ISSUE_TITLE\")) | .[0].number // empty")
+          if [ -n "$PR_URL" ]; then
+            printf '\nThe values the check could update are in %s.\n' "$PR_URL" >> "$REPORT"
+          fi
           if [ "$STATUS" = 1 ]; then
             if [ -n "$number" ]; then
               gh issue edit "$number" --body-file "$REPORT"
             else
               gh issue create --title "$ISSUE_TITLE" --body-file "$REPORT"
             fi
-          elif [ -n "$number" ]; then
-            gh issue close "$number" --comment 'All checked rates match T4127 now.'
+          elif [ "$STATUS" = 0 ] && [ -n "$number" ]; then
+            gh issue close "$number" --comment 'Nothing needs a manual check any more.'
           fi

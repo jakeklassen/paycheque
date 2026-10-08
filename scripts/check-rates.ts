@@ -11,7 +11,7 @@
  * differences are left for a person to resolve.
  *
  * Exit codes: 0 nothing left to do (after any --write), 1 something needs a
- * person, 2 CRA could not be reached.
+ * person, 2 CRA could not be reached, 3 the check itself failed.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { get as httpsGet } from 'node:https';
@@ -20,6 +20,13 @@ import { load, type CheerioAPI } from 'cheerio';
 import { format, resolveConfig } from 'prettier';
 import { NO_LIMIT, PROVINCE_NAMES } from '../src/lib/constants.ts';
 import type { BracketRow, ProvinceCode, RatesData } from '../src/lib/types.ts';
+
+// An unexpected error means the check itself failed (3), not that rates need a person (1).
+// Errors loading the modules (rates.json unreadable, say) happen before this and exit 1.
+process.on('uncaughtException', (err) => {
+	console.error(err);
+	process.exit(3);
+});
 
 const T4127 =
 	'https://www.canada.ca/en/revenue-agency/services/forms-publications/payroll/t4127-payroll-deductions-formulas';
@@ -41,6 +48,17 @@ const PRORATED_EXCEPTIONS: Record<string, { cra: number; annual: number }> = {
 	'2026-07 NL basic personal amount': { cra: 15_000, annual: 13_094 },
 	'2026-07 PE bracket 6 rate': { cra: 0.21, annual: 0.2 }
 };
+
+/**
+ * Mid-year changes already in rates.json that the edition being checked
+ * doesn't have yet: a change announced after the January edition, say, until
+ * the July edition shows it. Differences in these are expected, and --write
+ * leaves them alone. Keyed by "<year>-<month> <name>", where the name is an
+ * item as the report names it ("NL basic personal amount"), the start of
+ * several ("BC tax reduction" covers each of its items) or a set replaced as a
+ * whole ("PE brackets", "ON health premium"). The value says what changed.
+ */
+const MID_YEAR_CHANGES: Record<string, string> = {};
 
 const PROVINCES = (Object.keys(PROVINCE_NAMES) as ProvinceCode[]).filter((c) => c !== 'QC');
 
@@ -68,18 +86,35 @@ class NetworkError extends Error {}
 
 /**
  * Fetch with node:https rather than fetch: Canada.ca's Akamai CDN blocks
- * undici's TLS fingerprint.
+ * undici's TLS fingerprint. Follows redirects within the same host; any other
+ * non-200 response means the page has moved, which needs a person.
  */
-function fetchPage(url: string): Promise<string> {
+function fetchPage(url: string, redirects = 5): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const req = httpsGet(url, { headers: { 'User-Agent': USER_AGENT } }, (res) => {
+			const status = res.statusCode ?? 0;
+			const location = res.headers.location;
+			if (status !== 200) {
+				res.resume();
+				const next = location ? new URL(location, url) : null;
+				if (status >= 300 && status < 400 && next?.host === new URL(url).host && redirects > 0) {
+					resolve(fetchPage(next.href, redirects - 1));
+				} else if (status >= 500 || status === 429) {
+					reject(new NetworkError(`HTTP ${status}`));
+				} else {
+					reject(new Error(`HTTP ${status}${next ? ` to ${next.href}` : ''}; has the page moved?`));
+				}
+				return;
+			}
+			// Decode as a stream so a character split across chunks stays intact
+			res.setEncoding('utf8');
 			let data = '';
 			res.on('data', (chunk: string) => (data += chunk));
-			res.on('end', () =>
-				res.statusCode === 200
-					? resolve(data)
-					: reject(new NetworkError(`HTTP ${res.statusCode ?? 0}`))
-			);
+			res.on('end', () => resolve(data));
+			res.on('error', (err) => reject(new NetworkError(err.message)));
+			res.on('close', () => {
+				if (!res.complete) reject(new NetworkError('connection closed mid-download'));
+			});
 		});
 		req.on('error', (err) => reject(new NetworkError(err.message)));
 		req.setTimeout(FETCH_TIMEOUT_MS, () => {
@@ -111,8 +146,18 @@ interface Segment {
 
 const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
 
-/** Parse "$1,234.50", "0.0595", "142,520*" etc. Returns NaN for blanks and dashes. */
-const num = (s: string | undefined) => (s ? parseFloat(s.replace(/[$,*\s]/g, '')) : NaN);
+/**
+ * Parse "$1,234.50", "0.0595", "142,520*" etc. Returns NaN for blanks, dashes
+ * and anything else that isn't wholly a number ("3OO" isn't 3).
+ */
+const num = (s: string | undefined) => {
+	const digits = s?.replace(/[$,*\s]/g, '');
+	return digits ? Number(digits) : NaN;
+};
+
+/** A table cell's number: null when blank or a dash, NaN when unreadable or the column is missing */
+const cell = (s: string | undefined) =>
+	s === undefined ? NaN : /^[\s–—-]*$/.test(s) ? null : num(s);
 
 async function fetchEdition(url: string): Promise<Edition> {
 	const $ = load(await fetchPage(url));
@@ -214,11 +259,13 @@ function parseRateTable(rows: string[][]): Map<string, CraBrackets> {
 	return out;
 }
 
+/** Table 8.2 values: null where CRA leaves the cell blank, NaN where it can't be read */
 interface OtherAmounts {
+	/** A dollar amount, or the name of a formula such as BPAMB */
 	basic: string;
-	cea: number;
-	s2: number;
-	abatement: number;
+	cea: number | null;
+	s2: number | null;
+	abatement: number | null;
 	surtax: { threshold: number; rate: number }[];
 }
 
@@ -226,7 +273,11 @@ interface OtherAmounts {
 function parseOtherTable(rows: string[][]): Map<string, OtherAmounts> {
 	const out = new Map<string, OtherAmounts>();
 	if (rows.length === 0) return out;
-	const col = (name: string) => rows[0].indexOf(name);
+	const col = (name: string) => {
+		const i = rows[0].indexOf(name);
+		if (i === -1) unverified.push(`Table 8.2 has no "${name}" column`);
+		return i;
+	};
 	const [iBasic, iCea, iS2, iT4, iV1, iAbate] = [
 		'Basic amount',
 		'CEA',
@@ -235,25 +286,30 @@ function parseOtherTable(rows: string[][]): Map<string, OtherAmounts> {
 		'V1 rate',
 		'Abatement'
 	].map(col);
-	let current: OtherAmounts | null = null;
+	const surtax = new Map<string, { threshold: number | null; rate: number | null }[]>();
+	let current: string | null = null;
 	for (const row of rows.slice(1)) {
 		const isJurisdiction = row[0] === 'Federal' || /^[A-Z]{2}$/.test(row[0]);
 		if (isJurisdiction) {
-			current = {
-				basic: row[iBasic],
-				cea: num(row[iCea]),
-				s2: num(row[iS2]),
-				abatement: num(row[iAbate]),
-				surtax: [{ threshold: num(row[iT4]), rate: num(row[iV1]) }]
-			};
-			out.set(row[0], current);
+			current = row[0];
+			out.set(current, {
+				basic: row[iBasic] ?? '',
+				cea: cell(row[iCea]),
+				s2: cell(row[iS2]),
+				abatement: cell(row[iAbate]),
+				surtax: []
+			});
+			surtax.set(current, [{ threshold: cell(row[iT4]), rate: cell(row[iV1]) }]);
 		} else if (current && row[0] !== '' && !row[0].startsWith('Outside')) {
 			// Continuation rows hold further surtax steps: "T4 to V1 | V1 rate"
-			current.surtax.push({ threshold: num(row[0]), rate: num(row[1]) });
+			surtax.get(current)?.push({ threshold: cell(row[0]), rate: cell(row[1]) });
 		}
 	}
-	for (const amounts of out.values()) {
-		amounts.surtax = amounts.surtax.filter((s) => s.rate > 0);
+	for (const [code, steps] of surtax) {
+		// A blank or zero rate is no step; an unreadable one stays (as NaN) so it can't be dropped
+		out.get(code)!.surtax = steps
+			.filter((s) => s.rate !== null && s.rate !== 0)
+			.map((s) => ({ threshold: s.threshold ?? NaN, rate: s.rate ?? NaN }));
 	}
 	return out;
 }
@@ -300,20 +356,26 @@ interface PremiumTier {
 	rate: number;
 }
 
-/** Ontario Health Premium (V2): "the lesser of: (i) $cap; (ii) $base + (rate × (A – $start))" */
-function parseHealthPremium(text: string): PremiumTier[] {
+/**
+ * Ontario Health Premium (V2): "the lesser of: (i) $cap; (ii) $base + (rate × (A – $start))".
+ * Null unless every tier parses.
+ */
+function parseHealthPremium(text: string): PremiumTier[] | null {
 	const from = text.search(/V2\s*=\s*Where A/i);
-	if (from === -1) return [];
+	if (from === -1) return null;
 	const to = text.slice(from).search(/Note:/i);
 	const block = to === -1 ? text.slice(from) : text.slice(from, from + to);
 	const tierPattern =
 		/\(i\) \$([\d,]+); \(ii\) (?:\$([\d,]+) \+ \()?([\d.]+) × \(A – \$([\d,]+)\)/gi;
-	return [...block.matchAll(tierPattern)].map((m) => ({
+	const tiers = [...block.matchAll(tierPattern)].map((m) => ({
 		cap: num(m[1]),
 		base: m[2] ? num(m[2]) : 0,
 		rate: num(m[3]),
 		start: num(m[4])
 	}));
+	// Every "lesser of" clause is a tier; one that didn't match must not be dropped
+	const clauses = block.match(/the lesser of/gi)?.length ?? 0;
+	return tiers.length > 0 && tiers.length === clauses ? tiers : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +651,13 @@ async function main() {
 			cra: String(latest.year),
 			fix: { key: 'year', apply: () => startYear(latest.year) }
 		});
+		const thisYear = new Date().getFullYear();
+		if (latest.year > thisYear) {
+			notes.push(
+				`These are ${latest.year} rates, which take effect January 1, ${latest.year}. ` +
+					`Merging before then switches the site to ${latest.year} during ${thisYear}.`
+			);
+		}
 	} else if (latest.year < current.year) {
 		console.log(
 			`ℹ CRA hasn't published T4127 for ${current.year} yet; comparing against ${latest.year}.\n`
@@ -679,9 +748,11 @@ async function main() {
 		const amounts = otherRow(code, section);
 		const clawback = prov.personalAmountClawback;
 
-		if (amounts?.basic === 'BPAMB' || amounts?.basic === 'BPAYT') {
-			const formula = amounts.basic === 'BPAMB' ? bpamb : bpaf;
-			const mirrors = amounts.basic !== 'BPAYT' || yukonMirrorsFederal === true;
+		// "BPAMB", or with a footnote marker, "BPAMB*"
+		const basicFormula = amounts?.basic.replace(/[*\s]/g, '').toUpperCase();
+		if (basicFormula === 'BPAMB' || basicFormula === 'BPAYT') {
+			const formula = basicFormula === 'BPAMB' ? bpamb : bpaf;
+			const mirrors = basicFormula !== 'BPAYT' || yukonMirrorsFederal === true;
 			if (!mirrors) {
 				mismatches.push({
 					section,
@@ -706,15 +777,17 @@ async function main() {
 			compare(section, `${code} BPA clawback start`, clawback?.start, start, money, fix);
 			compare(section, `${code} BPA clawback end`, clawback?.end, end, money, fix);
 		} else if (amounts) {
+			const flat = num(amounts.basic);
 			compare(
 				section,
 				`${code} basic personal amount`,
 				prov.personalAmount,
-				num(amounts.basic),
+				flat,
 				money,
 				(v) => (provTarget.personalAmount = v)
 			);
-			if (clawback) {
+			// Only a readable flat amount shows the clawback is gone
+			if (clawback && Number.isFinite(flat)) {
 				mismatches.push({
 					section,
 					item: `${code} BPA clawback`,
@@ -835,7 +908,7 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		'Credits',
 		`${code} employment amount`,
 		prov.employmentAmount ?? 0,
-		amounts.cea || 0,
+		amounts.cea ?? 0,
 		money,
 		(v) => {
 			if (v) target.employmentAmount = v;
@@ -853,7 +926,16 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		parseReduction
 	);
 	if (formula === null) return; // present but not parsable: already unverified
-	if (formula === undefined && Number.isNaN(amounts.s2)) {
+	if (Number.isNaN(amounts.s2)) {
+		mismatches.push({
+			section,
+			item: `${code} tax reduction basic amount`,
+			code: reduction ? money(reduction.basic) : 'none',
+			cra: 'not readable (has the CRA page changed?)'
+		});
+		return;
+	}
+	if (formula === undefined && amounts.s2 === null) {
 		if (reduction) {
 			mismatches.push({
 				section,
@@ -867,12 +949,14 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		}
 		return;
 	}
+	// A factor S formula with a blank S2 has no basic amount to apply
+	const s2 = amounts.s2 ?? NaN;
 	if (!formula) {
 		mismatches.push({
 			section,
 			item: `${code} tax reduction formula`,
 			code: reduction?.kind ?? 'none',
-			cra: `S2 of ${money(amounts.s2)} but no factor S formula found (has the CRA page changed?)`
+			cra: `S2 of ${money(s2)} but no factor S formula found (has the CRA page changed?)`
 		});
 		return;
 	}
@@ -880,11 +964,11 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 		// calcTaxReduction applies the ontario kind as 2 × basic
 		const replacement =
 			formula.kind === 'ontario'
-				? formula.multiplier === 2 && allFinite(amounts.s2)
-					? { kind: 'ontario' as const, basic: amounts.s2 }
+				? formula.multiplier === 2 && allFinite(s2)
+					? { kind: 'ontario' as const, basic: s2 }
 					: undefined
-				: allFinite(amounts.s2, formula.threshold, formula.rate)
-					? { basic: amounts.s2, ...formula }
+				: allFinite(s2, formula.threshold, formula.rate)
+					? { basic: s2, ...formula }
 					: undefined;
 		mismatches.push({
 			section,
@@ -902,7 +986,7 @@ function checkProvincialExtras(src: Sources, code: ProvinceCode, amounts: OtherA
 	const basic = (v: number) => {
 		if (target.taxReduction) target.taxReduction.basic = v;
 	};
-	compare(section, `${code} tax reduction basic amount`, reduction.basic, amounts.s2, money, basic);
+	compare(section, `${code} tax reduction basic amount`, reduction.basic, s2, money, basic);
 	if (formula.kind === 'ontario') {
 		// calcTaxReduction applies the ontario kind as 2 × basic; another multiplier needs code changes
 		compare(section, `${code} tax reduction multiplier`, 2, formula.multiplier, String);
@@ -930,10 +1014,7 @@ function checkHealthPremium(src: Sources) {
 	const tiers = src.formula(
 		'Ontario Health Premium (V2) formula',
 		(ed) => definedIn(ed, 'V2'),
-		(t) => {
-			const parsed = parseHealthPremium(t);
-			return parsed.length > 0 ? parsed : null;
-		}
+		parseHealthPremium
 	);
 	if (tiers === undefined) {
 		unverified.push('Ontario Health Premium (V2) formula (not found in any edition)');
@@ -963,10 +1044,27 @@ function checkHealthPremium(src: Sources) {
 	});
 }
 
+/** The MID_YEAR_CHANGES entry covering a finding, by its item or its group */
+function midYearChange(f: Finding): string | undefined {
+	// Only a value read from CRA (which is what carries a fix) can be a known
+	// difference; an unreadable one still needs a person
+	if (!f.fix) return undefined;
+	for (const [key, change] of Object.entries(MID_YEAR_CHANGES)) {
+		if (!key.startsWith(`${editionKey} `)) continue;
+		const name = key.slice(editionKey.length + 1);
+		if (f.item === name || f.item.startsWith(`${name} `) || f.fix?.key === name) return change;
+	}
+	return undefined;
+}
+
 async function report(latest: Edition, jan: Edition) {
 	// July tables are prorated, so only a January edition can update rates.json
 	const writable = latest.month === 1;
 	const write = args.write && writable;
+	for (const f of mismatches.filter((m) => midYearChange(m))) {
+		mismatches.splice(mismatches.indexOf(f), 1);
+		expected.push({ ...f, note: `mid-year change: ${midYearChange(f)}` });
+	}
 	const applied: Finding[] = [];
 	if (write) {
 		const keys = new Set<string>();
@@ -1021,7 +1119,7 @@ async function report(latest: Edition, jan: Edition) {
 		for (const u of list) console.log(`    ${u}`);
 	}
 	if (expected.length) {
-		console.log('\nExpected differences (prorated July values):');
+		console.log('\nExpected differences:');
 		for (const f of expected)
 			console.log(`    ${f.item}: rates.json ${f.code} · CRA ${f.cra} — ${f.note}`);
 	}
@@ -1083,7 +1181,7 @@ async function report(latest: Edition, jan: Edition) {
 		md.push('### Could not verify', '', ...unverified.map((u) => `- ${u}`), '');
 	}
 	if (expected.length) {
-		md.push('### Expected differences (prorated July values)', '');
+		md.push('### Expected differences', '');
 		md.push(
 			...expected.map((f) => `- ${f.item}: rates.json ${f.code} · CRA ${f.cra} — ${f.note}`),
 			''

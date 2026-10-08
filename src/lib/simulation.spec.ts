@@ -111,6 +111,71 @@ describe('rates.json', () => {
 		}
 	});
 
+	// The import is cast to RatesData, so the type checker doesn't see misspelled
+	// or missing fields; an optional one misspelled would silently be ignored
+	it('has exactly the fields RatesData declares, with numbers where expected', () => {
+		const fields = (value: unknown, required: string[], optional: string[] = []) => {
+			const keys = Object.keys(value as object);
+			expect(keys.filter((k) => !required.includes(k) && !optional.includes(k))).toEqual([]);
+			expect(required.filter((k) => !keys.includes(k))).toEqual([]);
+		};
+		const numbers = (value: object, keys: string[]) => {
+			fields(value, keys);
+			for (const v of Object.values(value)) expect(v).toEqual(expect.any(Number));
+		};
+		fields(data, [
+			'year',
+			'quebecYear',
+			'notes',
+			'cpp',
+			'cpp2',
+			'ei',
+			'eiQuebec',
+			'federal',
+			'provinces'
+		]);
+		numbers({ year: data.year, quebecYear: data.quebecYear }, ['year', 'quebecYear']);
+		expect(data.notes).toEqual(expect.arrayContaining([expect.any(String)]));
+		numbers(data.cpp, ['rate', 'ympe', 'exemption', 'maxEmployee', 'enhancedRate']);
+		numbers(data.cpp2, ['rate', 'floor', 'yampe', 'maxEmployee']);
+		numbers(data.ei, ['rate', 'mie', 'maxEmployee']);
+		numbers(data.eiQuebec, ['rate', 'mie', 'maxEmployee']);
+		fields(data.federal, [
+			'brackets',
+			'personalAmount',
+			'canadaEmploymentAmount',
+			'quebecAbatement'
+		]);
+		numbers(data.federal.personalAmount, [
+			'amountMax',
+			'amountMin',
+			'clawbackStart',
+			'clawbackEnd'
+		]);
+		expect(data.federal.canadaEmploymentAmount).toEqual(expect.any(Number));
+		expect(data.federal.quebecAbatement).toEqual(expect.any(Number));
+
+		for (const p of Object.values(data.provinces)) {
+			fields(
+				p,
+				['brackets', 'personalAmount'],
+				['personalAmountClawback', 'surtax', 'taxReduction', 'employmentAmount', 'healthPremium']
+			);
+			expect(p.personalAmount).toEqual(expect.any(Number));
+			if (p.personalAmountClawback) {
+				numbers(p.personalAmountClawback, ['amountMin', 'start', 'end']);
+			}
+			for (const step of p.surtax ?? []) numbers(step, ['threshold', 'rate']);
+			if (p.taxReduction) {
+				const { kind, ...rest } = p.taxReduction;
+				expect(['ontario', 'income-tested']).toContain(kind);
+				numbers(rest, kind === 'ontario' ? ['basic'] : ['basic', 'threshold', 'rate']);
+			}
+			if ('employmentAmount' in p) expect(p.employmentAmount).toEqual(expect.any(Number));
+			for (const tier of p.healthPremium ?? []) numbers(tier, ['over', 'base', 'rate', 'max']);
+		}
+	});
+
 	it('builds a config for every province', () => {
 		expect(Object.keys(data.provinces).sort()).toEqual(Object.keys(PROVINCE_NAMES).sort());
 		for (const code of Object.keys(PROVINCE_NAMES)) {
