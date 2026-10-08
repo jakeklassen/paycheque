@@ -22,7 +22,8 @@ import { NO_LIMIT, PROVINCE_NAMES } from '../src/lib/constants.ts';
 import type { BracketRow, ProvinceCode, RatesData } from '../src/lib/types.ts';
 
 // An unexpected error means the check itself failed (3), not that rates need a person (1).
-// Errors loading the modules (rates.json unreadable, say) happen before this and exit 1.
+// Errors importing modules (constants.ts imports rates.json) happen before this and
+// exit 1; the workflow treats the missing report as a failed check.
 process.on('uncaughtException', (err) => {
 	console.error(err);
 	process.exit(3);
@@ -54,9 +55,10 @@ const PRORATED_EXCEPTIONS: Record<string, { cra: number; annual: number }> = {
  * doesn't have yet: a change announced after the January edition, say, until
  * the July edition shows it. Differences in these are expected, and --write
  * leaves them alone. Keyed by "<year>-<month> <name>", where the name is an
- * item as the report names it ("NL basic personal amount"), the start of
- * several ("BC tax reduction" covers each of its items) or a set replaced as a
- * whole ("PE brackets", "ON health premium"). The value says what changed.
+ * item as the report names it ("NL basic personal amount") or a set that's
+ * replaced as a whole ("PE brackets", "MB BPA", "ON health premium"). An item
+ * in a set holds the whole set: --write won't replace it for another item's
+ * sake. The value says what changed.
  */
 const MID_YEAR_CHANGES: Record<string, string> = {};
 
@@ -80,14 +82,20 @@ const args = parseArgs({
 const USER_AGENT =
 	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const FETCH_TIMEOUT_MS = 20_000;
+/** A slow trickle never trips the idle timeout above, so cap the whole download too */
+const FETCH_DEADLINE_MS = 120_000;
 
 /** CRA couldn't be reached, as opposed to a page that changed shape */
 class NetworkError extends Error {}
 
+/** A page that moved or changed shape: something a person has to look at */
+class PageError extends Error {}
+
 /**
  * Fetch with node:https rather than fetch: Canada.ca's Akamai CDN blocks
- * undici's TLS fingerprint. Follows redirects within the same host; any other
- * non-200 response means the page has moved, which needs a person.
+ * undici's TLS fingerprint. Follows redirects within the same host. Server
+ * errors, rate limits and blocks (403) are network failures; any other
+ * non-200 response means the page has moved.
  */
 function fetchPage(url: string, redirects = 5): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -96,13 +104,19 @@ function fetchPage(url: string, redirects = 5): Promise<string> {
 			const location = res.headers.location;
 			if (status !== 200) {
 				res.resume();
-				const next = location ? new URL(location, url) : null;
-				if (status >= 300 && status < 400 && next?.host === new URL(url).host && redirects > 0) {
+				const next = location ? URL.parse(location, url) : null;
+				if (
+					status >= 300 &&
+					status < 400 &&
+					next?.origin === new URL(url).origin &&
+					redirects > 0
+				) {
 					resolve(fetchPage(next.href, redirects - 1));
-				} else if (status >= 500 || status === 429) {
+				} else if (status >= 500 || [403, 408, 429].includes(status)) {
 					reject(new NetworkError(`HTTP ${status}`));
 				} else {
-					reject(new Error(`HTTP ${status}${next ? ` to ${next.href}` : ''}; has the page moved?`));
+					const to = next ? ` to ${next.href}` : location ? ` to "${location}"` : '';
+					reject(new PageError(`HTTP ${status}${to}; has the page moved?`));
 				}
 				return;
 			}
@@ -120,6 +134,9 @@ function fetchPage(url: string, redirects = 5): Promise<string> {
 		req.setTimeout(FETCH_TIMEOUT_MS, () => {
 			req.destroy(new Error(`timed out after ${FETCH_TIMEOUT_MS}ms`));
 		});
+		setTimeout(() => {
+			req.destroy(new Error(`took over ${FETCH_DEADLINE_MS}ms`));
+		}, FETCH_DEADLINE_MS).unref();
 	});
 }
 
@@ -163,7 +180,7 @@ async function fetchEdition(url: string): Promise<Edition> {
 	const $ = load(await fetchPage(url));
 	const title = clean($('h1').first().text());
 	const m = title.match(/Effective (January|July) 1, (\d{4})/);
-	if (!m) throw new Error(`unrecognised page title "${title}"`);
+	if (!m) throw new PageError(`unrecognised page title "${title}"`);
 	const segments = parseSegments($('main').html() ?? '');
 	return {
 		url,
@@ -616,7 +633,9 @@ async function main() {
 	try {
 		jan = await fetchEdition(JAN_URL);
 	} catch (err) {
-		const message = `Could not load the January T4127 edition (${(err as Error).message}):\n  ${JAN_URL}`;
+		// Anything else is a bug in the check (exit 3), not a changed page
+		if (!(err instanceof NetworkError || err instanceof PageError)) throw err;
+		const message = `Could not load the January T4127 edition (${err.message}):\n  ${JAN_URL}`;
 		console.error(message);
 		finish(err instanceof NetworkError ? 2 : 1, `## T4127 rate check\n\n${message}\n`);
 	}
@@ -624,13 +643,15 @@ async function main() {
 	try {
 		jul = await fetchEdition(JUL_URL);
 	} catch (err) {
+		if (!(err instanceof NetworkError || err instanceof PageError)) throw err;
 		if (err instanceof NetworkError) {
 			const message = `Could not load the July T4127 edition (${err.message}):\n  ${JUL_URL}`;
 			console.error(message);
 			finish(2, `## T4127 rate check\n\n${message}\n`);
 		}
 		unverified.push(
-			`July T4127 edition (${(err as Error).message}); mid-year changes were not checked`
+			`July T4127 edition (${err.message}); mid-year changes were not checked, so --write ` +
+				`didn't apply the January edition's values`
 		);
 	}
 
@@ -813,7 +834,7 @@ async function main() {
 
 	checkReductionAttribution(src);
 	checkHealthPremium(src);
-	await report(latest, jan);
+	await report(latest, jan, jul !== null);
 }
 
 /** A new tax year: its January edition replaces last year's notes */
@@ -1052,18 +1073,32 @@ function midYearChange(f: Finding): string | undefined {
 	for (const [key, change] of Object.entries(MID_YEAR_CHANGES)) {
 		if (!key.startsWith(`${editionKey} `)) continue;
 		const name = key.slice(editionKey.length + 1);
-		if (f.item === name || f.item.startsWith(`${name} `) || f.fix?.key === name) return change;
+		if (f.item === name || f.fix.key === name) return change;
 	}
 	return undefined;
 }
 
-async function report(latest: Edition, jan: Edition) {
+/**
+ * @param julChecked whether the July edition loaded. Without it, the January
+ *   edition can't be known to be the latest, and its values could undo
+ *   mid-year changes, so nothing is written.
+ */
+async function report(latest: Edition, jan: Edition, julChecked: boolean) {
 	// July tables are prorated, so only a January edition can update rates.json
-	const writable = latest.month === 1;
+	const writable = latest.month === 1 && julChecked;
 	const write = args.write && writable;
+	// A set holding a mid-year change isn't replaced for another item's sake either
+	const held = new Set<string>();
 	for (const f of mismatches.filter((m) => midYearChange(m))) {
 		mismatches.splice(mismatches.indexOf(f), 1);
 		expected.push({ ...f, note: `mid-year change: ${midYearChange(f)}` });
+		if (f.fix) held.add(f.fix.key);
+	}
+	for (const f of mismatches) {
+		if (f.fix && held.has(f.fix.key)) {
+			f.note = `not updated: ${f.fix.key} includes a mid-year change; update it by hand`;
+			delete f.fix;
+		}
 	}
 	const applied: Finding[] = [];
 	if (write) {
@@ -1102,7 +1137,7 @@ async function report(latest: Edition, jan: Edition) {
 			);
 		}
 	}
-	if (open.some((f) => f.fix) && !writable) {
+	if (open.some((f) => f.fix) && latest.month === 7) {
 		console.log(
 			`\n  July editions show prorated July–December values, so --write won't use them. Find each\n` +
 				`  annual value in the edition's "What's new" section, update rates.json, and add a\n` +
@@ -1160,7 +1195,7 @@ async function report(latest: Edition, jan: Edition) {
 	}
 	if (open.length) {
 		md.push('### Needs a person', '');
-		if (open.some((f) => f.fix) && !writable) {
+		if (open.some((f) => f.fix) && latest.month === 7) {
 			md.push(
 				"July editions show prorated July–December values, so these weren't applied. Find each annual value in the edition's \"What's new\" section, update `src/lib/rates.json`, and add a `PRORATED_EXCEPTIONS` entry in `scripts/check-rates.ts`.",
 				''
