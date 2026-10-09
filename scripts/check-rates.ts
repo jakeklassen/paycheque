@@ -187,7 +187,7 @@ async function fetchEdition(url: string): Promise<Edition> {
 	// Footnote markers would run into the number before them ("15,780<sup>1</sup>" reads as
 	// 157801); ordinals such as "1<sup>st</sup>" stay
 	$('sup')
-		.filter((_, el) => $(el).find('a').length > 0 || /^[\d\s,*†‡]+$/.test($(el).text()))
+		.filter((_, el) => $(el).find('a').length > 0 || /^[\s()[\]\d,.*†‡§¶]+$/.test($(el).text()))
 		.remove();
 	const title = clean($('h1').first().text());
 	const m = title.match(/Effective (January|July) 1, (\d{4})/);
