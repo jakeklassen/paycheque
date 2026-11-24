@@ -1,65 +1,62 @@
 {
-	"year": 2026,
+	"year": 2027,
 	"quebecYear": 2026,
 	"notes": [
-		"Annual values from CRA T4127 Payroll Deductions Formulas (122nd ed., Jan 2026) unless noted. Checked by `pnpm check:rates`.",
-		"BC: lowest rate 5.60% and tax reduction basic amount $690 (announced Feb 17, 2026). T4127 (Jul 2026) shows the prorated July-December 6.14% and $805.",
-		"NL: basic personal amount $13,094 (announced Apr 29, 2026). T4127 (Jul 2026) shows the prorated $15,000.",
-		"PE: 20% bracket over $200,000 and no surtax (announced Apr 14, 2026). T4127 (Jul 2026) shows the prorated 21%.",
-		"QC: provincial brackets and basic personal amount are from Quebec Finance's 2026 personal income tax parameters; CRA doesn't publish them.",
+		"Annual values from CRA T4127 Payroll Deductions Formulas (Jan 2027) unless noted. Checked by `pnpm check:rates`.",
+		"QC: provincial brackets and basic personal amount are from Quebec Finance's personal income tax parameters for quebecYear; CRA doesn't publish them.",
 		"YT: the basic personal amount mirrors the federal one, including its clawback (BPAYT = BPAF)."
 	],
 	"cpp": {
-		"rate": 0.0595,
-		"ympe": 74600,
+		"rate": 0.0575,
+		"ympe": 76700,
 		"exemption": 3500,
-		"maxEmployee": 4230.45,
+		"maxEmployee": 4209,
 		"enhancedRate": 0.01
 	},
 	"cpp2": {
 		"rate": 0.04,
-		"floor": 74600,
-		"yampe": 85000,
-		"maxEmployee": 416
+		"floor": 76700,
+		"yampe": 87400,
+		"maxEmployee": 428
 	},
 	"ei": {
-		"rate": 0.0163,
-		"mie": 68900,
-		"maxEmployee": 1123.07
+		"rate": 0.0164,
+		"mie": 70800,
+		"maxEmployee": 1161.12
 	},
 	"eiQuebec": {
-		"rate": 0.013,
-		"mie": 68900,
-		"maxEmployee": 895.7
+		"rate": 0.0129,
+		"mie": 70800,
+		"maxEmployee": 913.32
 	},
 	"federal": {
 		"brackets": [
 			[0, 0.14],
-			[58523, 0.205],
-			[117045, 0.26],
-			[181440, 0.29],
-			[258482, 0.33]
+			[60044, 0.205],
+			[120088, 0.26],
+			[186157, 0.29],
+			[265203, 0.33]
 		],
 		"personalAmount": {
-			"amountMax": 16452,
-			"amountMin": 14829,
-			"clawbackStart": 181440,
-			"clawbackEnd": 258482
+			"amountMax": 16879,
+			"amountMin": 15214,
+			"clawbackStart": 186157,
+			"clawbackEnd": 265203
 		},
-		"canadaEmploymentAmount": 1501,
+		"canadaEmploymentAmount": 1540,
 		"quebecAbatement": 0.165
 	},
 	"provinces": {
 		"AB": {
 			"brackets": [
 				[0, 0.08],
-				[61200, 0.1],
-				[154259, 0.12],
-				[185111, 0.13],
-				[246813, 0.14],
-				[370220, 0.15]
+				[62424, 0.1],
+				[157344, 0.12],
+				[188813, 0.13],
+				[251750, 0.14],
+				[377625, 0.15]
 			],
-			"personalAmount": 22769
+			"personalAmount": 23225
 		},
 		"BC": {
 			"brackets": [
@@ -95,75 +92,75 @@
 		"NB": {
 			"brackets": [
 				[0, 0.094],
-				[52333, 0.14],
-				[104666, 0.16],
-				[193861, 0.195]
+				[53693, 0.14],
+				[107388, 0.16],
+				[198902, 0.195]
 			],
-			"personalAmount": 13664
+			"personalAmount": 14019
 		},
 		"NL": {
 			"brackets": [
 				[0, 0.087],
-				[44678, 0.145],
-				[89354, 0.158],
-				[159528, 0.178],
-				[223340, 0.198],
-				[285319, 0.208],
-				[570638, 0.213],
-				[1141275, 0.218]
+				[46152, 0.145],
+				[92303, 0.158],
+				[164792, 0.178],
+				[230710, 0.198],
+				[294734, 0.208],
+				[589469, 0.213],
+				[1178938, 0.218]
 			],
-			"personalAmount": 13094
+			"personalAmount": 15495
 		},
 		"NS": {
 			"brackets": [
 				[0, 0.0879],
-				[30995, 0.1495],
-				[61991, 0.1667],
-				[97417, 0.175],
-				[157124, 0.21]
+				[32080, 0.1495],
+				[64160, 0.1667],
+				[100827, 0.175],
+				[162624, 0.21]
 			],
-			"personalAmount": 11932
+			"personalAmount": 12350
 		},
 		"NT": {
 			"brackets": [
 				[0, 0.059],
-				[53003, 0.086],
-				[106009, 0.122],
-				[172346, 0.1405]
+				[54381, 0.086],
+				[108765, 0.122],
+				[176827, 0.1405]
 			],
-			"personalAmount": 18198
+			"personalAmount": 18672
 		},
 		"NU": {
 			"brackets": [
 				[0, 0.04],
-				[55801, 0.07],
-				[111602, 0.09],
-				[181439, 0.115]
+				[57252, 0.07],
+				[114503, 0.09],
+				[186156, 0.115]
 			],
-			"personalAmount": 19659
+			"personalAmount": 20170
 		},
 		"ON": {
 			"brackets": [
 				[0, 0.0505],
-				[53891, 0.0915],
-				[107785, 0.1116],
+				[55023, 0.0915],
+				[110049, 0.1116],
 				[150000, 0.1216],
 				[220000, 0.1316]
 			],
-			"personalAmount": 12989,
+			"personalAmount": 13261,
 			"surtax": [
 				{
-					"threshold": 5818,
+					"threshold": 5940,
 					"rate": 0.2
 				},
 				{
-					"threshold": 7446,
+					"threshold": 7603,
 					"rate": 0.36
 				}
 			],
 			"taxReduction": {
 				"kind": "ontario",
-				"basic": 300
+				"basic": 306
 			},
 			"healthPremium": [
 				{
@@ -221,26 +218,26 @@
 		"SK": {
 			"brackets": [
 				[0, 0.105],
-				[54532, 0.125],
-				[155805, 0.145]
+				[55950, 0.125],
+				[159856, 0.145]
 			],
-			"personalAmount": 20381
+			"personalAmount": 21411
 		},
 		"YT": {
 			"brackets": [
 				[0, 0.064],
-				[58523, 0.09],
-				[117045, 0.109],
-				[181440, 0.128],
+				[60044, 0.09],
+				[120088, 0.109],
+				[186157, 0.128],
 				[500000, 0.15]
 			],
-			"personalAmount": 16452,
+			"personalAmount": 16879,
 			"personalAmountClawback": {
-				"amountMin": 14829,
-				"start": 181440,
-				"end": 258482
+				"amountMin": 15214,
+				"start": 186157,
+				"end": 265203
 			},
-			"employmentAmount": 1501
+			"employmentAmount": 1540
 		}
 	}
 }
